@@ -11,7 +11,7 @@ import Svg, { Circle, Line, Path, Polygon, Rect } from 'react-native-svg';
 import { Palette, Radius, Shadows } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import { auth } from '../../services/firebase';
-import { dispenseNow, listenDeviceStatus, listenMedications, listenPowerSaving, Medication, setPowerSaving } from '../../services/medicationService';
+import { dispenseNow, listenMedications, listenPowerSaving, Medication, setPowerSaving } from '../../services/medicationService';
 
 const BellIcon = ({ showDot }: { showDot: boolean }) => {
   const { palette } = useAccessibility();
@@ -107,16 +107,6 @@ const BatteryIcon = () => {
   );
 };
 
-const MapPinIcon = () => {
-  const { palette } = useAccessibility();
-  return (
-    <Svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={palette.text} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-      <Circle cx="12" cy="10" r="3"/>
-    </Svg>
-  );
-};
-
 const DarkModeIcon = ({ dark }: { dark: boolean }) => (
   dark
     ? <Moon size={20} color="#60A5FA" />
@@ -129,7 +119,6 @@ export default function SettingsScreen() {
   const [doseReminders, setDoseReminders] = useState(true);
   const [soundAlerts, setSoundAlerts] = useState(true);
   const [autoRefill, setAutoRefill] = useState(true);
-  const [device, setDevice] = useState<any>(null);
   const [dispensing, setDispensing] = useState(false);
   const [powerSaving, setPowerSavingState] = useState(false);
   const [medications, setMedications] = useState<Medication[]>([]);
@@ -153,11 +142,6 @@ export default function SettingsScreen() {
   );
 
   React.useEffect(() => {
-    const unsub = listenDeviceStatus(setDevice);
-    return () => unsub();
-  }, []);
-
-  React.useEffect(() => {
     const unsub = listenMedications(setMedications);
     return () => unsub();
   }, []);
@@ -170,18 +154,6 @@ export default function SettingsScreen() {
   const handlePowerSaving = (val: boolean) => {
     setPowerSavingState(val);
     setPowerSaving(val);
-  };
-
-  const getLastSync = (lastSync: string) => {
-    if (!lastSync) return 'Never';
-    try {
-      const syncTime = new Date(lastSync);
-      const now = new Date();
-      const diff = Math.floor((now.getTime() - syncTime.getTime()) / 60000);
-      if (diff < 1) return 'Just now';
-      if (diff < 60) return `${diff}m ago`;
-      return `${Math.floor(diff / 60)}h ago`;
-    } catch { return lastSync; }
   };
 
   const handleManualDispense = (compartment: number) => {
@@ -282,37 +254,6 @@ export default function SettingsScreen() {
           />
         </View>
 
-        {/* Device Status */}
-        <Text style={styles.sectionLabel}>Device Status</Text>
-        <View style={styles.deviceCard}>
-          <View style={styles.deviceRow}>
-            <Text style={styles.deviceLabel}>Status</Text>
-            <View style={[styles.statusBadge, { backgroundColor: device?.connected ? cbColors.successSoft : cbColors.dangerSoft }]}>
-              <Text style={[styles.statusText, { color: device?.connected ? cbColors.success : cbColors.danger }]}>
-                {device?.connected ? 'Connected' : 'Offline'}
-              </Text>
-            </View>
-          </View>
-          {device?.battery != null && (
-            <View style={styles.deviceRow}>
-              <Text style={styles.deviceLabel}>Battery</Text>
-              <Text style={styles.deviceValue}>{device.battery}%</Text>
-            </View>
-          )}
-          {device?.lastSync && (
-            <View style={styles.deviceRow}>
-              <Text style={styles.deviceLabel}>Last Sync</Text>
-              <Text style={styles.deviceValue}>{getLastSync(device.lastSync)}</Text>
-            </View>
-          )}
-          {device?.signalStrength != null && (
-            <View style={styles.deviceRow}>
-              <Text style={styles.deviceLabel}>Signal</Text>
-              <Text style={styles.deviceValue}>{device.signalStrength} dBm</Text>
-            </View>
-          )}
-        </View>
-
         {/* Manual Dispense */}
         <Text style={styles.sectionLabel}>Manual Dispense</Text>
         <View style={styles.dispenseCard}>
@@ -374,14 +315,6 @@ export default function SettingsScreen() {
             subtitle="SIM Network Status"
             onPress={() => router.push('/cellular-settings')}
           />
-          <View style={styles.divider} />
-          <ChevronRow
-            icon={<MapPinIcon />}
-            title="Find My Device"
-            subtitle="Ring device to locate it"
-            onPress={() => router.push('/find-device')}
-          />
-          <View style={styles.divider} />
           <ToggleRow
             icon={<BatteryIcon />}
             title="Power Saving Mode"
@@ -428,16 +361,6 @@ export default function SettingsScreen() {
           />
         </View>
 
-        {device?.connected && (
-          <View style={styles.infoCard}>
-            <Text style={styles.infoTitle}>Device Information</Text>
-            {device?.model     && <Text style={styles.infoText}>Model: {device.model}</Text>}
-            {device?.firmware  && <Text style={styles.infoText}>Firmware: {device.firmware}</Text>}
-            {device?.serialNumber && <Text style={styles.infoText}>Serial: {device.serialNumber}</Text>}
-            {device?.lastSync  && <Text style={styles.infoText}>Last Sync: {getLastSync(device.lastSync)}</Text>}
-          </View>
-        )}
-
         <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>
           <Text style={styles.signOutText}>Sign Out</Text>
         </TouchableOpacity>
@@ -457,12 +380,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   pageTitle: { fontSize: 25, fontWeight: '900', color: P.text, marginBottom: 16, marginTop: 8 },
   sectionLabel: { fontSize: 13, fontWeight: '800', color: P.textMuted, marginBottom: 6, marginTop: 12, paddingLeft: 4, textTransform: 'uppercase' },
   card: { backgroundColor: P.surface, borderRadius: Radius.lg, overflow: 'hidden', marginBottom: 6, borderWidth: 1, borderColor: P.border, padding: 2, ...Shadows.card },
-  deviceCard: { backgroundColor: P.surface, borderRadius: Radius.lg, padding: 16, marginBottom: 6, borderWidth: 1, borderColor: P.border, ...Shadows.card },
-  deviceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  deviceLabel: { fontSize: 14, color: P.textMuted, fontWeight: '700' },
-  deviceValue: { fontSize: 14, fontWeight: '800', color: P.text },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
-  statusText: { fontSize: 13, fontWeight: '700' },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16 },
   iconBox: { width: 38, height: 38, borderRadius: Radius.sm, backgroundColor: P.primarySoft, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
   rowText: { flex: 1 },

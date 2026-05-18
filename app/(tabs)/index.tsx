@@ -1,6 +1,6 @@
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Battery, Bell, CheckCircle2, Clock, Plus, Signal, Trash2, Zap } from 'lucide-react-native';
+import { Bell, CheckCircle2, Clock, Plus, Trash2, Zap } from 'lucide-react-native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert, Animated, Platform, ScrollView, StatusBar, StyleSheet, Text,
@@ -9,7 +9,7 @@ import {
 import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
-  deleteMedication, dispenseNow, listenDeviceStatus, listenESP32History,
+  deleteMedication, dispenseNow, listenESP32History,
   listenMedications, markMedicationTaken, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
@@ -20,14 +20,6 @@ const greeting = () => {
   if (h < 17) return 'Good afternoon';
   if (h < 21) return 'Good evening';
   return 'Good night';
-};
-
-const relativeTime = (iso: string) => {
-  if (!iso) return 'Never';
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
-  if (diff < 1) return 'Just now';
-  if (diff < 60) return `${diff}m ago`;
-  return `${Math.floor(diff / 60)}h ago`;
 };
 
 function MedCard({ med, onTaken }: { med: Medication; onTaken: (id: string) => void }) {
@@ -139,7 +131,6 @@ function HistoryItem({ item }: { item: any }) {
 
 export default function HomeScreen() {
   const [medications, setMedications] = useState<Medication[]>([]);
-  const [device, setDevice]           = useState<any>(null);
   const [history, setHistory]         = useState<any[]>([]);
   const router = useRouter();
   const { hasUnread } = useNotifications();
@@ -156,8 +147,7 @@ export default function HomeScreen() {
       setMedications(meds);
       scheduleReminders(meds);
     });
-    const u2 = listenDeviceStatus(setDevice);
-    const u3 = listenESP32History((h) => {
+    const u2 = listenESP32History((h) => {
       const filtered = [...h].filter(item => item.medication).reverse();
 
       if (!historyInitialized.current) {
@@ -180,7 +170,7 @@ export default function HomeScreen() {
 
       setHistory(filtered.slice(0, 8));
     });
-    return () => { u1(); u2(); u3(); };
+    return () => { u1(); u2(); };
   }, []);
 
   const scheduleReminders = async (meds: Medication[]) => {
@@ -198,10 +188,6 @@ export default function HomeScreen() {
   };
 
   const handleDispenseNow = async (comp: number) => {
-    if (!connected) {
-      Alert.alert('Device Offline', 'The device must be connected to dispense manually.');
-      return;
-    }
     Alert.alert(
       `Dispense from C${comp}?`,
       'This will immediately dispense 1 pill from that compartment.',
@@ -226,10 +212,6 @@ export default function HomeScreen() {
   const total   = medications.length;
   const adherence = total > 0 ? Math.round((taken.length / total) * 100) : 0;
   const nextDose  = pending[0];
-  const connected = !!device?.connected;
-  const connStyle = connected
-    ? { bg: cbColors.successSoft, fg: cbColors.success }
-    : { bg: cbColors.dangerSoft,  fg: cbColors.danger  };
 
   useFocusEffect(
     React.useCallback(() => {
@@ -266,30 +248,6 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        <View style={s.deviceStrip}>
-          <View style={[s.stripChip, { backgroundColor: connStyle.bg, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }]}>
-            <View style={[s.statusDot, { backgroundColor: connStyle.fg }]} />
-            <Text style={[s.stripTxt, { color: connStyle.fg, fontWeight: '700' }]}>
-              {connected ? 'Connected' : 'Offline'}
-            </Text>
-          </View>
-
-          {device?.battery != null && <>
-            <View style={s.stripSep} />
-            <View style={s.stripItem}>
-              <Battery size={13} color={palette.textMuted} />
-              <Text style={s.stripTxt}>{device.battery}%</Text>
-            </View>
-          </>}
-
-          {device?.lastSync && <>
-            <View style={s.stripSep} />
-            <View style={s.stripItem}>
-              <Signal size={13} color={palette.textMuted} />
-              <Text style={s.stripTxt}>{relativeTime(device.lastSync)}</Text>
-            </View>
-          </>}
-        </View>
       </View>
 
       <ScrollView
@@ -357,15 +315,12 @@ export default function HomeScreen() {
             {[1, 2, 3].map(comp => (
               <TouchableOpacity
                 key={comp}
-                style={[
-                  s.dispenseBtn,
-                  !connected && s.dispenseBtnDisabled,
-                ]}
+                style={s.dispenseBtn}
                 onPress={() => handleDispenseNow(comp)}
-                activeOpacity={connected ? 0.75 : 1}
+                activeOpacity={0.75}
               >
-                <Text style={[s.dispenseBtnLabel, !connected && { color: palette.textSoft }]}>C{comp}</Text>
-                <Text style={[s.dispenseBtnSub, !connected && { color: palette.textSoft }]}>Comp {comp}</Text>
+                <Text style={s.dispenseBtnLabel}>C{comp}</Text>
+                <Text style={s.dispenseBtnSub}>Comp {comp}</Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -450,18 +405,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
     width: 8, height: 8, borderRadius: 4,
     backgroundColor: P.rose, borderWidth: 1.5, borderColor: P.surface,
   },
-
-  deviceStrip: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: P.background,
-    borderRadius: Radius.md, paddingVertical: 8, paddingHorizontal: 12,
-    gap: 10, borderWidth: 1, borderColor: P.border,
-  },
-  stripChip:   { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  stripItem:   { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  statusDot:   { width: 7, height: 7, borderRadius: 4 },
-  stripTxt:    { ...Type.caption, color: P.textMuted },
-  stripSep:    { width: 1, height: 14, backgroundColor: P.border },
 
   scroll: { paddingTop: Space.lg, paddingHorizontal: Space.lg, paddingBottom: 40 },
 
@@ -554,9 +497,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
     flex: 1, paddingVertical: 16, borderRadius: 12,
     backgroundColor: P.primarySoft, alignItems: 'center',
     borderWidth: 1.5, borderColor: P.primary + '40',
-  },
-  dispenseBtnDisabled: {
-    backgroundColor: P.background, borderColor: P.border,
   },
   dispenseBtnLabel: { fontSize: 18, fontWeight: '900', color: P.primary },
   dispenseBtnSub:   { fontSize: 11, fontWeight: '600', color: P.primary, marginTop: 2, opacity: 0.75 },
