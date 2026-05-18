@@ -189,7 +189,15 @@ export const listenDeviceStatus = (callback: (status: any) => void) => {
   const statusRef = ref(rtdb, 'smartdose/device');
   return onValue(statusRef, (snapshot) => {
     if (snapshot.exists()) {
-      callback(snapshot.val());
+      const status = snapshot.val();
+      const lastSeen = Number(status.lastSyncMs ?? Date.parse(status.lastSync ?? ''));
+      const heartbeatFresh = !Number.isFinite(lastSeen) || Date.now() - lastSeen < 7 * 60 * 1000;
+      callback({
+        ...status,
+        connected: status.connected === true && heartbeatFresh,
+      });
+    } else {
+      callback({ connected: false });
     }
   });
 };
