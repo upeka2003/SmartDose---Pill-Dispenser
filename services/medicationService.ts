@@ -185,6 +185,9 @@ export const listenPowerSaving = (callback: (enabled: boolean) => void) => {
   });
 };
 
+// Heartbeat timeout: device sends status every 60s; allow 5 minutes before marking offline.
+const HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
 export const listenDeviceStatus = (callback: (status: any) => void) => {
   const statusRef = ref(rtdb, 'smartdose/device');
   return onValue(
@@ -195,32 +198,36 @@ export const listenDeviceStatus = (callback: (status: any) => void) => {
         return;
       }
       const status = snapshot.val();
+      const now = Date.now();
 
-      // Primary liveness signal: uptimeMs is device millis() — always-increasing,
-      // clock-independent. If present and changed since last write, device is alive.
-      // We treat any data with connected:true as live when uptimeMs exists
-      // (the Firebase onValue listener fires only on real changes, not cached stale data).
-      if (status.uptimeMs !== undefined) {
-        // Device firmware supports uptimeMs — trust connected flag directly.
-        callback({ ...status, connected: status.connected === true });
+      // Primary: Firebase server timestamp — set by Firebase itself, always accurate UTC.
+      // Device writes {".sv":"timestamp"} which Firebase replaces with server ms.
+      const serverTime = Number(status.serverTime);
+      if (Number.isFinite(serverTime) && serverTime > 1_000_000_000_000) {
+        const ageMs = now - serverTime;
+        // Allow up to 30s future offset (phone/server clock skew tolerance).
+        const fresh = ageMs > -30_000 && ageMs < HEARTBEAT_TIMEOUT_MS;
+        callback({ ...status, connected: status.connected === true && fresh });
         return;
       }
 
-      // Fallback for older firmware without uptimeMs: use timestamp with generous window.
-      // Use Math.abs so future timestamps (timezone mismatch) also pass the check.
+      // Fallback for older firmware without serverTime.
+      // RTC stores local time (UTC+5:30) treated as UTC → lastSyncMs is ~19800000ms
+      // (5.5 h) in the future.  Without Math.abs, a negative ageMs (future timestamp
+      // = device just wrote this) is correctly treated as fresh, while a large
+      // positive ageMs (device genuinely offline for hours) triggers the timeout.
       const lastSeen = Number(status.lastSyncMs ?? Date.parse(status.lastSync ?? ''));
-      const now = Date.now();
-      const ageMs = Math.abs(now - lastSeen); // absolute difference handles future timestamps
-      const heartbeatFresh = !Number.isFinite(lastSeen) || ageMs < 12 * 60 * 60 * 1000; // 12h
-      callback({
-        ...status,
-        connected: status.connected === true && heartbeatFresh,
-      });
+      if (!Number.isFinite(lastSeen)) {
+        callback({ ...status, connected: status.connected === true });
+        return;
+      }
+      const ageMs = now - lastSeen; // negative when timestamp is in the future (timezone-shifted RTC)
+      const fresh = ageMs < HEARTBEAT_TIMEOUT_MS;
+      callback({ ...status, connected: status.connected === true && fresh });
     },
     (error) => {
-      // Firebase permission denied or network error
       const code = (error as any).code ?? 'unknown';
-      console.error('[SmartDose] RTDB device status error:', code, error.message);
+      console.error('[SmartDose] RTDB listenDeviceStatus error:', code, error.message);
       callback({ connected: false, _rtdbError: code });
     }
   );

@@ -349,15 +349,8 @@ export default function HomeScreen() {
         {/* ── Dispense Now card ─────────────────────────────────────── */}
         <View style={s.dispenseCard}>
           <View style={s.dispenseHeader}>
-            <Zap size={15} color={connected ? palette.primary : palette.textMuted} />
-            <Text style={[s.dispenseTitle, !connected && { color: palette.textMuted }]}>
-              Dispense Now
-            </Text>
-            {!connected && (
-              <View style={[s.offlineTag, { backgroundColor: cbColors.dangerSoft }]}>
-                <Text style={[s.offlineTagTxt, { color: cbColors.danger }]}>Offline</Text>
-              </View>
-            )}
+            <Zap size={15} color={palette.primary} />
+            <Text style={s.dispenseTitle}>Dispense Now</Text>
           </View>
           <Text style={s.dispenseSub}>Manually dispense from a compartment immediately</Text>
           <View style={s.dispenseRow}>
@@ -555,8 +548,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   },
   dispenseHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
   dispenseTitle:  { fontSize: 15, fontWeight: '800', color: P.text },
-  offlineTag:     { marginLeft: 'auto', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999 },
-  offlineTagTxt:  { fontSize: 11, fontWeight: '700' },
   dispenseSub:    { fontSize: 12, color: P.textSoft, marginBottom: 14 },
   dispenseRow:    { flexDirection: 'row', gap: 10 },
   dispenseBtn:    {

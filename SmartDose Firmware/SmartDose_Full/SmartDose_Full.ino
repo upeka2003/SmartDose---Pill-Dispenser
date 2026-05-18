@@ -884,11 +884,14 @@ void updateDeviceStatus(bool connected) {
   String uptimeMs   = String(millis());
   int signal = modem.getSignalQuality();
 
+  // {".sv":"timestamp"} tells Firebase to write the server's own UTC timestamp.
+  // The app compares this against Date.now() for real-time online/offline detection.
   String json = "{\"connected\":" + String(connected ? "true" : "false") +
                 ",\"battery\":100" +
                 ",\"lastSync\":\"" + iso + "\"" +
                 ",\"lastSyncMs\":" + lastSyncMs +
                 ",\"uptimeMs\":" + uptimeMs +
+                ",\"serverTime\":{\".sv\":\"timestamp\"}" +
                 ",\"signalStrength\":" + String(signal) +
                 ",\"model\":\"SmartDose SIM7600\"" +
                 ",\"firmware\":\"1.0.0\"}";

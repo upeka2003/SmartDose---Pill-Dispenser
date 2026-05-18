@@ -10,7 +10,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Palette } from '../constants/theme';
 import { useAccessibility } from '../contexts/AccessibilityContext';
 import { db, rtdb } from '../services/firebase';
-import { listenDeviceStatus } from '../services/medicationService';
 
 const COLORS    = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'];
 const CB_COLORS = ['#2563EB', '#0891B2', '#D97706', '#C2410C', '#7C3AED', '#DB2777'];
@@ -178,7 +177,6 @@ export default function ModalScreen() {
   const [pillCount, setPillCount] = useState('1');
   const [notes, setNotes]         = useState('');
   const [loading, setLoading]     = useState(false);
-  const [device, setDevice]       = useState<any>(null);
 
   // Time picker state
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -186,12 +184,8 @@ export default function ModalScreen() {
 
   useEffect(() => {
     if (voiceEnabled) speak('Add or edit medication details.');
-    const unsub = listenDeviceStatus(setDevice);
-    return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const connected = !!device?.connected;
 
   const updateFrequency = (freq: string) => {
     setFrequency(freq);
@@ -247,10 +241,7 @@ export default function ModalScreen() {
         });
       }
 
-      const syncMsg = connected
-        ? 'Device will sync in up to 5 minutes.'
-        : 'Device is offline — it will sync when it reconnects.';
-      Alert.alert('Saved!', `${name.trim()} scheduled. ${syncMsg}`);
+      Alert.alert('Saved!', `${name.trim()} scheduled. Device will sync in up to 5 minutes.`);
       router.back();
     } catch (e) {
       Alert.alert('Error', 'Failed to save. Please try again.');
@@ -270,27 +261,11 @@ export default function ModalScreen() {
         </TouchableOpacity>
         <View style={s.headerCenter}>
           <Text style={s.title}>Add Medicine</Text>
-          {/* Device status chip */}
-          <View style={[s.deviceChip, { backgroundColor: connected ? '#D1FAE5' : '#FEE2E2' }]}>
-            <View style={[s.deviceDot, { backgroundColor: connected ? '#059669' : '#EF4444' }]} />
-            <Text style={[s.deviceTxt, { color: connected ? '#059669' : '#EF4444' }]}>
-              {connected ? 'Device Online' : 'Device Offline'}
-            </Text>
-          </View>
         </View>
         <TouchableOpacity style={s.headerBtn} onPress={handleSave} disabled={loading} activeOpacity={0.6}>
           <Text style={s.save}>{loading ? '...' : 'Save'}</Text>
         </TouchableOpacity>
       </View>
-
-      {/* Offline warning banner */}
-      {!connected && (
-        <View style={s.offlineBanner}>
-          <Text style={s.offlineTxt}>
-            ⚠️  Device is offline. The schedule will sync once it reconnects.
-          </Text>
-        </View>
-      )}
 
       <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
 
@@ -475,11 +450,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   cancel:      { color: '#ef4444', fontSize: 16 },
   title:       { fontSize: 17, fontWeight: '800', color: P.text },
   save:        { color: P.primary, fontSize: 16, fontWeight: '700', textAlign: 'right' },
-  deviceChip:  { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 3, borderRadius: 999 },
-  deviceDot:   { width: 6, height: 6, borderRadius: 3 },
-  deviceTxt:   { fontSize: 11, fontWeight: '700' },
-  offlineBanner:{ backgroundColor: '#FEF3C7', paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FDE68A' },
-  offlineTxt:  { fontSize: 13, color: '#92400E', fontWeight: '600' },
   section:     { margin: 16, marginBottom: 0, backgroundColor: P.surface, borderRadius: 12, padding: 16, borderWidth: 1, borderColor: P.border },
   sectionTitle:{ fontSize: 12, fontWeight: '700', color: P.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 },
   sectionHint: { fontSize: 12, color: P.textSoft, marginBottom: 12 },
