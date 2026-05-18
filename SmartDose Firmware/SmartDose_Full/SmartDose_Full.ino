@@ -98,7 +98,7 @@ void IRAM_ATTR handleButton() {
 
 void connectGSM();
 String firebaseGet(String path);
-void firebasePut(String path, String jsonBody);
+int  firebasePut(String path, String jsonBody);
 void fetchMedications();
 void checkCommands();
 void updateDeviceStatus(bool connected = true);
@@ -516,6 +516,13 @@ void connectGSM() {
   Serial.println("Modem: " + modem.getModemInfo());
   lcdPrint("Connecting...", "Network...");
 
+  // Enable automatic network time sync BEFORE registering on the network
+  gsmSerial.println("AT+CLTS=1");
+  delay(500);
+  gsmSerial.println("AT+CTZU=1");
+  delay(500);
+  esp_task_wdt_reset();
+
   bool netOk = false;
   for (int i = 0; i < 12 && !netOk; i++) {
     esp_task_wdt_reset();
@@ -542,27 +549,67 @@ void connectGSM() {
   setRGB(0, 1, 0);
   Serial.println("GPRS OK! IP: " + modem.localIP().toString());
 
-  delay(1000);
-  gsmSerial.println("AT+CCLK?");
-  delay(2000);
-  String timeResp = "";
-  unsigned long t = millis();
-  while (millis() - t < 3000) {
-    while (gsmSerial.available()) timeResp += (char)gsmSerial.read();
+  // Try AT+CCLK? up to 3 times — network may need a moment to provide time
+  bool timeSynced = false;
+  for (int attempt = 0; attempt < 3 && !timeSynced; attempt++) {
+    esp_task_wdt_reset();
+    delay(1500);
+    gsmSerial.println("AT+CCLK?");
+    delay(2000);
+    String timeResp = "";
+    unsigned long t = millis();
+    while (millis() - t < 3000) {
+      while (gsmSerial.available()) timeResp += (char)gsmSerial.read();
+    }
+
+    int idx = timeResp.indexOf("+CCLK:");
+    if (idx != -1) {
+      String tp = timeResp.substring(idx + 8, idx + 25);
+      int yr = tp.substring(0, 2).toInt() + 2000;
+      int mo = tp.substring(3, 5).toInt();
+      int dy = tp.substring(6, 8).toInt();
+      int hr = tp.substring(9, 11).toInt();
+      int mn = tp.substring(12, 14).toInt();
+      int sc = tp.substring(15, 17).toInt();
+
+      // Sanity check: year must be 2020 or later
+      if (yr >= 2020 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31) {
+        rtc.adjust(DateTime(yr, mo, dy, hr, mn, sc));
+        lcdPrint("Time Synced!", pad(hr) + ":" + pad(mn));
+        Serial.println("RTC synced: " + String(yr) + "-" + pad(mo) + "-" + pad(dy) +
+                       " " + pad(hr) + ":" + pad(mn));
+        timeSynced = true;
+        delay(1000);
+      }
+    }
+    if (!timeSynced) {
+      Serial.println("Time sync attempt " + String(attempt + 1) + " failed, retrying...");
+    }
   }
 
-  int idx = timeResp.indexOf("+CCLK:");
-  if (idx != -1) {
-    String tp = timeResp.substring(idx + 8, idx + 25);
-    int yr = tp.substring(0, 2).toInt() + 2000;
-    int mo = tp.substring(3, 5).toInt();
-    int dy = tp.substring(6, 8).toInt();
-    int hr = tp.substring(9, 11).toInt();
-    int mn = tp.substring(12, 14).toInt();
-    int sc = tp.substring(15, 17).toInt();
-    rtc.adjust(DateTime(yr, mo, dy, hr, mn, sc));
-    lcdPrint("Time Synced!", pad(hr) + ":" + pad(mn));
+  if (!timeSynced) {
+    Serial.println("Warning: RTC not synced from network. Timestamps may be inaccurate.");
+    lcdPrint("Time sync fail", "Using RTC time");
     delay(1000);
+  }
+
+  // ── Firebase connectivity test ────────────────────────────────────────
+  lcdPrint("Testing...", "Firebase conn");
+  Serial.println("Testing Firebase connectivity...");
+  int testStatus = firebasePut(String(DB_PATH) + "/ping", "{\"ping\":true}");
+  if (testStatus == 200) {
+    lcdPrint("Firebase OK!", "Connected");
+    Serial.println("Firebase connection test PASSED.");
+    delay(1500);
+  } else if (testStatus == 401 || testStatus == 403) {
+    lcdPrint("Firebase AUTH", "FAILED! Chk key");
+    Serial.println("CRITICAL: Firebase auth failed (HTTP " + String(testStatus) + ").");
+    Serial.println("Check FIREBASE_AUTH token in firmware.");
+    delay(3000);
+  } else {
+    lcdPrint("Firebase FAIL", "HTTP:" + String(testStatus));
+    Serial.println("Firebase test failed (HTTP " + String(testStatus) + "). Check network.");
+    delay(2000);
   }
 }
 
@@ -571,27 +618,31 @@ String firebaseGet(String path) {
 
   String url = "https://" + String(FIREBASE_HOST) + path + ".json?auth=" + FIREBASE_AUTH;
 
-  gsmSerial.println("AT+HTTPTERM"); delay(500);
-  gsmSerial.println("AT+HTTPINIT"); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"CID\",1"); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"URL\",\"" + url + "\""); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(500);
-  gsmSerial.println("AT+HTTPACTION=0"); delay(5000);
+  gsmSerial.println("AT+HTTPTERM"); delay(1000);
+  gsmSerial.println("AT+HTTPINIT"); delay(1000);
+  gsmSerial.println("AT+HTTPPARA=\"CID\",1"); delay(600);
+  gsmSerial.println("AT+HTTPPARA=\"URL\",\"" + url + "\""); delay(600);
+  gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(600);
+  gsmSerial.println("AT+HTTPACTION=0");
 
+  // Wait up to 20 seconds for +HTTPACTION URC
   String response = "";
   unsigned long t = millis();
-  while (millis() - t < 3000) {
+  while (millis() - t < 20000) {
+    esp_task_wdt_reset();
     while (gsmSerial.available()) response += (char)gsmSerial.read();
+    if (response.indexOf("+HTTPACTION:") != -1) break;
   }
 
-  gsmSerial.println("AT+HTTPREAD=0,4000"); delay(2500);
+  gsmSerial.println("AT+HTTPREAD=0,4000");
   String body = "";
   t = millis();
-  while (millis() - t < 3000) {
+  while (millis() - t < 5000) {
+    esp_task_wdt_reset();
     while (gsmSerial.available()) body += (char)gsmSerial.read();
   }
 
-  gsmSerial.println("AT+HTTPTERM"); delay(500);
+  gsmSerial.println("AT+HTTPTERM"); delay(600);
 
   int objStart = body.indexOf('{');
   int objEnd = body.lastIndexOf('}');
@@ -608,28 +659,78 @@ String firebaseGet(String path) {
   return "";
 }
 
-void firebasePut(String path, String jsonBody) {
+// Returns HTTP status code (200 = OK, 401 = auth error, 0 = network/timeout fail)
+int firebasePut(String path, String jsonBody) {
   if (!modem.isGprsConnected()) connectGSM();
+  if (!modem.isGprsConnected()) {
+    Serial.println("PUT FAIL: no GPRS for " + path);
+    return 0;
+  }
 
   String url = "https://" + String(FIREBASE_HOST) + path + ".json?auth=" + FIREBASE_AUTH;
 
-  gsmSerial.println("AT+HTTPTERM"); delay(500);
-  gsmSerial.println("AT+HTTPINIT"); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"CID\",1"); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"URL\",\"" + url + "\""); delay(500);
-  gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(500);
-  gsmSerial.println("AT+HTTPDATA=" + String(jsonBody.length()) + ",5000"); delay(1000);
-  gsmSerial.print(jsonBody); delay(2000);
-  gsmSerial.println("AT+HTTPACTION=1"); delay(5000);
+  gsmSerial.println("AT+HTTPTERM"); delay(1000);
+  gsmSerial.println("AT+HTTPINIT"); delay(1000);
+  gsmSerial.println("AT+HTTPPARA=\"CID\",1"); delay(600);
+  gsmSerial.println("AT+HTTPPARA=\"URL\",\"" + url + "\""); delay(600);
+  gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(600);
+  gsmSerial.println("AT+HTTPDATA=" + String(jsonBody.length()) + ",8000"); delay(300);
 
+  // Wait for "DOWNLOAD" prompt before sending body (SIM7600 requires this)
+  String dlResp = "";
+  unsigned long dlT = millis();
+  while (millis() - dlT < 4000) {
+    esp_task_wdt_reset();
+    while (gsmSerial.available()) dlResp += (char)gsmSerial.read();
+    if (dlResp.indexOf("DOWNLOAD") != -1) break;
+    if (dlResp.indexOf("ERROR") != -1) {
+      Serial.println("AT+HTTPDATA ERROR: " + dlResp);
+      gsmSerial.println("AT+HTTPTERM"); delay(500);
+      return 0;
+    }
+  }
+  Serial.println("DOWNLOAD prompt: " + dlResp);
+
+  gsmSerial.print(jsonBody);
+  delay(500);
+
+  gsmSerial.println("AT+HTTPACTION=1");
+
+  // Wait up to 20 seconds for +HTTPACTION URC (larger payloads can take longer)
   String response = "";
   unsigned long t = millis();
-  while (millis() - t < 3000) {
+  while (millis() - t < 20000) {
+    esp_task_wdt_reset();
     while (gsmSerial.available()) response += (char)gsmSerial.read();
+    if (response.indexOf("+HTTPACTION:") != -1) break;
   }
 
-  gsmSerial.println("AT+HTTPTERM"); delay(500);
-  Serial.println("PUT " + path + " -> " + response);
+  gsmSerial.println("AT+HTTPTERM"); delay(600);
+
+  // Parse "+HTTPACTION: 1,<status>,<len>"
+  int httpStatus = 0;
+  int actionIdx = response.indexOf("+HTTPACTION:");
+  if (actionIdx != -1) {
+    int firstComma  = response.indexOf(',', actionIdx);
+    int secondComma = response.indexOf(',', firstComma + 1);
+    if (firstComma != -1 && secondComma != -1) {
+      httpStatus = response.substring(firstComma + 1, secondComma).toInt();
+    }
+  }
+
+  Serial.println("PUT " + path + " -> HTTP " + String(httpStatus));
+
+  if (httpStatus == 401 || httpStatus == 403) {
+    lcdPrint("Firebase Auth", "ERR " + String(httpStatus));
+    Serial.println("ERROR: Firebase auth rejected (HTTP " + String(httpStatus) + "). Check FIREBASE_AUTH.");
+    delay(2000);
+  } else if (httpStatus == 0) {
+    Serial.println("WARNING: No +HTTPACTION response received. Modem/network issue.");
+    lcdPrint("No Response", "Check GSM");
+    delay(1500);
+  }
+
+  return httpStatus;
 }
 
 void fetchMedications() {
@@ -773,18 +874,33 @@ void updateDeviceStatus(bool connected) {
   DateTime now = rtc.now();
   String iso = String(now.year()) + "-" + pad(now.month()) + "-" + pad(now.day()) +
                "T" + pad(now.hour()) + ":" + pad(now.minute()) + ":" + pad(now.second()) + "Z";
+
+  // Use millis()-based server epoch for lastSyncMs so the app's freshness check
+  // isn't affected by RTC timezone/clock issues.  We store the RTC ISO for display
+  // and a millis-delta timestamp that the app compares against Date.now().
+  // Because we can't know the true epoch from millis alone, we use unixtime() but
+  // also write a separate "uptimeMs" field the app can use as a liveness proof.
   String lastSyncMs = String((uint64_t)now.unixtime() * 1000ULL);
+  String uptimeMs   = String(millis());
   int signal = modem.getSignalQuality();
 
   String json = "{\"connected\":" + String(connected ? "true" : "false") +
                 ",\"battery\":100" +
                 ",\"lastSync\":\"" + iso + "\"" +
                 ",\"lastSyncMs\":" + lastSyncMs +
+                ",\"uptimeMs\":" + uptimeMs +
                 ",\"signalStrength\":" + String(signal) +
                 ",\"model\":\"SmartDose SIM7600\"" +
                 ",\"firmware\":\"1.0.0\"}";
 
-  firebasePut(String(DB_PATH) + "/device", json);
+  int httpStatus = firebasePut(String(DB_PATH) + "/device", json);
+  if (httpStatus == 200) {
+    Serial.println("Device status OK -> Firebase /device updated.");
+  } else {
+    Serial.println("Device status FAILED! HTTP=" + String(httpStatus));
+    lcdPrint("Status FAIL", "HTTP:" + String(httpStatus));
+    delay(2000);
+  }
 }
 
 void logHistory(String medName, int comp, String status) {

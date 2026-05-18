@@ -9,7 +9,7 @@ import {
 import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
-  deleteMedication, listenDeviceStatus, listenESP32History,
+  deleteMedication, dispenseNow, listenDeviceStatus, listenESP32History,
   listenMedications, markMedicationTaken, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
@@ -197,6 +197,30 @@ export default function HomeScreen() {
     await markMedicationTaken(id);
   };
 
+  const handleDispenseNow = async (comp: number) => {
+    if (!connected) {
+      Alert.alert('Device Offline', 'The device must be connected to dispense manually.');
+      return;
+    }
+    Alert.alert(
+      `Dispense from C${comp}?`,
+      'This will immediately dispense 1 pill from that compartment.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Dispense',
+          onPress: async () => {
+            try {
+              await dispenseNow(comp);
+            } catch {
+              Alert.alert('Error', 'Could not send dispense command.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const taken   = medications.filter(m => m.taken);
   const pending = medications.filter(m => !m.taken);
   const total   = medications.length;
@@ -321,6 +345,38 @@ export default function HomeScreen() {
             </View>
           </View>
         )}
+
+        {/* ── Dispense Now card ─────────────────────────────────────── */}
+        <View style={s.dispenseCard}>
+          <View style={s.dispenseHeader}>
+            <Zap size={15} color={connected ? palette.primary : palette.textMuted} />
+            <Text style={[s.dispenseTitle, !connected && { color: palette.textMuted }]}>
+              Dispense Now
+            </Text>
+            {!connected && (
+              <View style={[s.offlineTag, { backgroundColor: cbColors.dangerSoft }]}>
+                <Text style={[s.offlineTagTxt, { color: cbColors.danger }]}>Offline</Text>
+              </View>
+            )}
+          </View>
+          <Text style={s.dispenseSub}>Manually dispense from a compartment immediately</Text>
+          <View style={s.dispenseRow}>
+            {[1, 2, 3].map(comp => (
+              <TouchableOpacity
+                key={comp}
+                style={[
+                  s.dispenseBtn,
+                  !connected && s.dispenseBtnDisabled,
+                ]}
+                onPress={() => handleDispenseNow(comp)}
+                activeOpacity={connected ? 0.75 : 1}
+              >
+                <Text style={[s.dispenseBtnLabel, !connected && { color: palette.textSoft }]}>C{comp}</Text>
+                <Text style={[s.dispenseBtnSub, !connected && { color: palette.textSoft }]}>Comp {comp}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
 
         <View style={s.section}>
           <View style={s.sectionRow}>
@@ -489,6 +545,30 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     ...Shadows.button,
   },
+
+  // Dispense Now card
+  dispenseCard: {
+    backgroundColor: P.surface, borderRadius: Radius.lg,
+    padding: Space.lg, marginBottom: Space.md,
+    borderWidth: 1, borderColor: P.border,
+    ...Shadows.card,
+  },
+  dispenseHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  dispenseTitle:  { fontSize: 15, fontWeight: '800', color: P.text },
+  offlineTag:     { marginLeft: 'auto', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999 },
+  offlineTagTxt:  { fontSize: 11, fontWeight: '700' },
+  dispenseSub:    { fontSize: 12, color: P.textSoft, marginBottom: 14 },
+  dispenseRow:    { flexDirection: 'row', gap: 10 },
+  dispenseBtn:    {
+    flex: 1, paddingVertical: 16, borderRadius: 12,
+    backgroundColor: P.primarySoft, alignItems: 'center',
+    borderWidth: 1.5, borderColor: P.primary + '40',
+  },
+  dispenseBtnDisabled: {
+    backgroundColor: P.background, borderColor: P.border,
+  },
+  dispenseBtnLabel: { fontSize: 18, fontWeight: '900', color: P.primary },
+  dispenseBtnSub:   { fontSize: 11, fontWeight: '600', color: P.primary, marginTop: 2, opacity: 0.75 },
 });
 
 const makeCardStyles = (P: typeof Palette) => StyleSheet.create({

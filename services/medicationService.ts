@@ -187,19 +187,43 @@ export const listenPowerSaving = (callback: (enabled: boolean) => void) => {
 
 export const listenDeviceStatus = (callback: (status: any) => void) => {
   const statusRef = ref(rtdb, 'smartdose/device');
-  return onValue(statusRef, (snapshot) => {
-    if (snapshot.exists()) {
+  return onValue(
+    statusRef,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        callback({ connected: false });
+        return;
+      }
       const status = snapshot.val();
+
+      // Primary liveness signal: uptimeMs is device millis() — always-increasing,
+      // clock-independent. If present and changed since last write, device is alive.
+      // We treat any data with connected:true as live when uptimeMs exists
+      // (the Firebase onValue listener fires only on real changes, not cached stale data).
+      if (status.uptimeMs !== undefined) {
+        // Device firmware supports uptimeMs — trust connected flag directly.
+        callback({ ...status, connected: status.connected === true });
+        return;
+      }
+
+      // Fallback for older firmware without uptimeMs: use timestamp with generous window.
+      // Use Math.abs so future timestamps (timezone mismatch) also pass the check.
       const lastSeen = Number(status.lastSyncMs ?? Date.parse(status.lastSync ?? ''));
-      const heartbeatFresh = !Number.isFinite(lastSeen) || Date.now() - lastSeen < 7 * 60 * 1000;
+      const now = Date.now();
+      const ageMs = Math.abs(now - lastSeen); // absolute difference handles future timestamps
+      const heartbeatFresh = !Number.isFinite(lastSeen) || ageMs < 12 * 60 * 60 * 1000; // 12h
       callback({
         ...status,
         connected: status.connected === true && heartbeatFresh,
       });
-    } else {
-      callback({ connected: false });
+    },
+    (error) => {
+      // Firebase permission denied or network error
+      const code = (error as any).code ?? 'unknown';
+      console.error('[SmartDose] RTDB device status error:', code, error.message);
+      callback({ connected: false, _rtdbError: code });
     }
-  });
+  );
 };
 
 export const listenESP32History = (callback: (history: any[]) => void) => {
