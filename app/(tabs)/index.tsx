@@ -10,7 +10,7 @@ import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../consta
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
   deleteMedication, dispenseNow, listenESP32History,
-  listenMedications, Medication,
+  listenMedications, listenRTDBMedicationStatuses, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
 
@@ -122,12 +122,14 @@ const isRecentHistoryItem = (item: any) => {
 };
 
 const findMedicationForHistory = (meds: Medication[], item: any) => {
-  const medId = String(item.medicationId ?? item.medId ?? '');
+  const medId   = String(item.medicationId ?? item.medId ?? '');
+  const baseId  = medId.replace(/_\d+$/, ''); // strip _N suffix from old firmware slot keys
   const medName = String(item.medication ?? '').trim().toLowerCase();
   const itemComp = Number(item.compartment);
 
   return (
     meds.find(m => medId && m.id === medId) ??
+    meds.find(m => baseId && baseId !== medId && m.id === baseId) ??
     meds.find(m => medName && m.name.trim().toLowerCase() === medName) ??
     meds.find(m => Number.isFinite(itemComp) && Number(m.compartment) === itemComp + 1) ??
     meds.find(m => Number.isFinite(itemComp) && Number(m.compartment) === itemComp)
@@ -168,8 +170,9 @@ function HistoryItem({ item }: { item: any }) {
 }
 
 export default function HomeScreen() {
-  const [medications, setMedications] = useState<Medication[]>([]);
-  const [history, setHistory]         = useState<any[]>([]);
+  const [medications, setMedications]     = useState<Medication[]>([]);
+  const [history, setHistory]             = useState<any[]>([]);
+  const [rtdbStatuses, setRtdbStatuses]   = useState<Record<string, string>>({});
   const router = useRouter();
   const { hasUnread } = useNotifications();
   const { speak, voiceEnabled, cbColors, palette, darkMode } = useAccessibility();
@@ -190,7 +193,8 @@ export default function HomeScreen() {
 
       setHistory(filtered.slice(0, 8));
     });
-    return () => { u1(); u2(); };
+    const u3 = listenRTDBMedicationStatuses(setRtdbStatuses);
+    return () => { u1(); u2(); u3(); };
   }, []);
 
   const scheduleReminders = async (meds: Medication[]) => {
@@ -239,8 +243,13 @@ export default function HomeScreen() {
     return result;
   }, [history, medications]);
 
-  const getDoseStatus = (med: Medication): DoseStatus =>
-    doseStatusByMedicationId[med.id] ?? (med.taken ? 'taken' : 'pending');
+  const getDoseStatus = (med: Medication): DoseStatus => {
+    const fromHistory = doseStatusByMedicationId[med.id];
+    if (fromHistory) return fromHistory;
+    const fromRtdb = normalizeDoseStatus(rtdbStatuses[med.id]);
+    if (fromRtdb) return fromRtdb;
+    return med.taken ? 'taken' : 'pending';
+  };
 
   const taken   = medications.filter(m => getDoseStatus(m) === 'taken');
   const missed  = medications.filter(m => getDoseStatus(m) === 'missed');

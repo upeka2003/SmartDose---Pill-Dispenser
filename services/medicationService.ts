@@ -245,6 +245,23 @@ export const listenESP32History = (callback: (history: any[]) => void) => {
   });
 };
 
+export const listenRTDBMedicationStatuses = (
+  callback: (statuses: Record<string, string>) => void
+) => {
+  const medsRef = ref(rtdb, 'smartdose/medications');
+  return onValue(medsRef, (snapshot) => {
+    if (!snapshot.exists()) { callback({}); return; }
+    const data = snapshot.val() as Record<string, any>;
+    const statuses: Record<string, string> = {};
+    for (const val of Object.values(data)) {
+      if (val?.medicationId && val?.lastStatus && !statuses[val.medicationId]) {
+        statuses[val.medicationId] = val.lastStatus;
+      }
+    }
+    callback(statuses);
+  });
+};
+
 export const listenInventory = (callback: (inventory: Record<string, number>) => void) => {
   const inventoryRef = ref(rtdb, 'smartdose/inventory');
   return onValue(inventoryRef, (snapshot) => {

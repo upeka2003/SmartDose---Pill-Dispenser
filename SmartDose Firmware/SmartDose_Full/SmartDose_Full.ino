@@ -40,6 +40,7 @@
 #define DEVICE_STATUS_INTERVAL_MS 60000UL
 #define MED_SYNC_INTERVAL_MS      300000UL
 #define DOOR_AUTO_CLOSE_MS        120000UL
+#define DOSE_CONFIRM_TIMEOUT_MS   1800000UL  // 30 minutes
 
 RTC_DS3231 rtc;
 PCF8575 pcf(0x20);
@@ -57,7 +58,8 @@ int stepSeq[4][4] = {
 };
 
 struct MedSlot {
-  String id;
+  String id;           // RTDB slot key e.g. "abc123_0"
+  String medicationId; // Firestore doc ID e.g. "abc123"
   String name;
   int hour;
   int minute;
@@ -80,6 +82,12 @@ int demoMinute = -1;
 unsigned long lastCmd = 0;
 unsigned long lastMedSync = 0;
 unsigned long lastDeviceStatus = 0;
+
+static bool waitingForButton = false;
+static unsigned long alertStartMs = 0;
+static int pendingMatched[10];
+static int pendingCount = 0;
+static unsigned long lastBeepMs = 0;
 
 volatile bool buttonPressed = false;
 volatile unsigned long lastButtonIsrMs = 0;
@@ -111,6 +119,7 @@ void sendDoseNotification(String medName, String status);
 void handleDoorAutoClose();
 void handleSerialCommand(String cmd);
 void runMotorTest(int compartment, int rotations, bool clockwise);
+void doDispense();
 
 String pad(int n) {
   return (n < 10 ? "0" : "") + String(n);
@@ -224,23 +233,62 @@ void loop() {
   String timeStr = pad(now.hour()) + ":" + pad(now.minute());
   String dateStr = pad(now.day()) + "/" + pad(now.month()) + "/" + pad(now.year() % 100);
 
-  if (!doorOpen) {
+  if (!doorOpen && !waitingForButton) {
     lcdPrint("SD " + timeStr + " " + dateStr, "Ready");
   }
 
-  if (buttonPressed) {
+  if (buttonPressed && !waitingForButton) {
     buttonPressed = false;
     Serial.println("BUTTON PRESSED");
     Serial.println("Time: " + timeStr + " | Slots: " + String(slotCount));
   }
 
+  if (waitingForButton) {
+    if (buttonPressed) {
+      buttonPressed = false;
+      doDispense();
+      return;
+    }
+
+    // සෑම 30s වරක් buzzer reminder
+    if ((unsigned long)(millis() - lastBeepMs) > 30000UL) {
+      buzzerAlert(2);
+      int remaining = (int)((DOSE_CONFIRM_TIMEOUT_MS - (unsigned long)(millis() - alertStartMs)) / 60000UL);
+      if (remaining < 0) remaining = 0;
+      lcdPrint("Dose Time!", String(remaining) + "min left");
+      lastBeepMs = millis();
+    }
+
+    // 30 minutes timeout — missed
+    if ((unsigned long)(millis() - alertStartMs) > DOSE_CONFIRM_TIMEOUT_MS) {
+      Serial.println("Dose missed (30min timeout)");
+      waitingForButton = false;
+      alertStartMs = 0;
+      setRGB(1, 0, 0);
+      lcdPrint("Dose Missed!", "Not taken");
+      buzzerAlert(5);
+
+      for (int j = 0; j < pendingCount; j++) {
+        int mi = pendingMatched[j];
+        logHistory(slots[mi].medicationId, slots[mi].name, slots[mi].compartment, "missed");
+        sendDoseNotification(slots[mi].name, "missed");
+        // App එකේ real-time update සඳහා lastStatus write කරනවා
+        firebasePut(String(DB_PATH) + "/medications/" + slots[mi].id + "/lastStatus", "\"missed\"");
+      }
+      pendingCount = 0;
+      delay(3000);
+      setRGB(0, 1, 0);
+      lcdPrint("SmartDose", "Ready!");
+    }
+  }
+
   if ((unsigned long)(millis() - lastCmd) > COMMAND_INTERVAL_MS) {
-    checkCommands();
+    if (!waitingForButton) checkCommands();
     lastCmd = millis();
   }
 
   if ((unsigned long)(millis() - lastMedSync) > MED_SYNC_INTERVAL_MS) {
-    fetchMedications();
+    if (!waitingForButton) fetchMedications();
     lastMedSync = millis();
   }
 
@@ -249,7 +297,7 @@ void loop() {
     lastDeviceStatus = millis();
   }
 
-  checkMedicationTimes(rtc.now());
+  if (!waitingForButton) checkMedicationTimes(rtc.now());
 
   static int lastDay = -1;
   if (now.day() != lastDay) {
@@ -259,6 +307,8 @@ void loop() {
         slots[i].waitingConfirm = false;
       }
       currentDoseIndex = -1;
+      waitingForButton = false;
+      pendingCount = 0;
       Serial.println("Daily reset done.");
     }
     lastDay = now.day();
@@ -273,6 +323,48 @@ void loop() {
       break;
     }
   }
+}
+
+void doDispense() {
+  waitingForButton = false;
+  alertStartMs = 0;
+
+  setRGB(0, 0, 1);
+  lcdPrint("Dose Time!", "Dispensing...");
+  openDoor();
+  delay(DISPENSE_DELAY_MS);
+
+  String names[10]; String medIds[10]; String slotKeys[10]; int comps[10];
+  for (int j = 0; j < pendingCount; j++) {
+    int i = pendingMatched[j];
+    lcdPrint("Dispensing...", slots[i].name.substring(0, 16));
+    Serial.println("Dispensing: " + slots[i].name +
+                   " C:" + String(slots[i].compartment + 1) +
+                   " x" + String(slots[i].pillCount));
+    dispensePills(slots[i].compartment, slots[i].pillCount);
+    names[j]    = slots[i].name;
+    medIds[j]   = slots[i].medicationId;  // Firestore doc ID
+    slotKeys[j] = slots[i].id;            // RTDB slot key
+    comps[j]    = slots[i].compartment;
+  }
+
+  lcdPrint("Take pills!", "Door closing..");
+  setRGB(0, 1, 0);
+  buzzerAlert(2);
+  handleDoorAutoClose();
+
+  lcdPrint("Syncing...", "Cloud update");
+  setRGB(0, 0, 1);
+  for (int j = 0; j < pendingCount; j++) {
+    logHistory(medIds[j], names[j], comps[j], "taken");
+    sendDoseNotification(names[j], "taken");
+    // App එකේ real-time update සඳහා lastStatus write කරනවා
+    firebasePut(String(DB_PATH) + "/medications/" + slotKeys[j] + "/lastStatus", "\"taken\"");
+  }
+  pendingCount = 0;
+  updateDeviceStatus(true);
+  setRGB(0, 1, 0);
+  lcdPrint("SmartDose", "Ready!");
 }
 
 void handleDoorAutoClose() {
@@ -327,43 +419,18 @@ void checkMedicationTimes(DateTime now) {
   for (int j = 0; j < matchedCount; j++) {
     slots[matched[j]].triggered = true;
     slots[matched[j]].waitingConfirm = false;
+    pendingMatched[j] = matched[j];
   }
-  currentDoseIndex = -1;
+  pendingCount = matchedCount;
+
+  waitingForButton = true;
+  alertStartMs = millis();
+  lastBeepMs = millis();
 
   setRGB(1, 0, 0);
   buzzerAlert(3);
-  lcdPrint("Dose Time!", "Dispensing...");
-  openDoor();
-  delay(DISPENSE_DELAY_MS);
-  setRGB(0, 0, 1);
-
-  String names[10]; String ids[10]; int comps[10];
-  for (int j = 0; j < matchedCount; j++) {
-    int i = matched[j];
-    lcdPrint("Dispensing...", slots[i].name.substring(0, 16));
-    Serial.println("Dispensing: " + slots[i].name +
-                   " C:" + String(slots[i].compartment + 1) +
-                   " x" + String(slots[i].pillCount));
-    dispensePills(slots[i].compartment, slots[i].pillCount);
-    names[j] = slots[i].name;
-    ids[j]   = slots[i].id;
-    comps[j] = slots[i].compartment;
-  }
-
-  lcdPrint("Take your pills!", "Door closing...");
-  setRGB(0, 1, 0);
-  buzzerAlert(2);
-  handleDoorAutoClose();
-
-  lcdPrint("Syncing...", "Cloud update");
-  setRGB(0, 0, 1);
-  for (int j = 0; j < matchedCount; j++) {
-    logHistory(ids[j], names[j], comps[j], "taken");
-    sendDoseNotification(names[j], "taken");
-  }
-  updateDeviceStatus(true);
-  setRGB(0, 1, 0);
-  lcdPrint("SmartDose", "Ready!");
+  lcdPrint("Dose Time!", "Press button!");
+  Serial.println("Waiting for button press (30min timeout)...");
 }
 
 void stepMotor(int motor, int steps, bool cw) {
@@ -552,7 +619,6 @@ String firebaseGet(String path) {
 
   gsmSerial.println("AT+HTTPTERM"); delay(600);
 
-  // Parse and print HTTP status from +HTTPACTION: response
   int haIdx = response.indexOf("+HTTPACTION:");
   if (haIdx != -1) {
     int commaA = response.indexOf(',', haIdx);
@@ -580,15 +646,11 @@ String firebaseGet(String path) {
     return body.substring(arrStart, arrEnd + 1);
   }
 
-  // Firebase returns literal "null" for empty/non-existent paths — not a network error
-  if (body.indexOf("null") != -1) {
-    return "null";
-  }
+  if (body.indexOf("null") != -1) return "null";
 
   return "";
 }
 
-// FIX: SIM7600 ">" prompt + Days:0x0 fix
 int firebasePut(String path, String jsonBody) {
   if (!modem.isGprsConnected()) connectGSM();
   if (!modem.isGprsConnected()) {
@@ -606,7 +668,6 @@ int firebasePut(String path, String jsonBody) {
   gsmSerial.println("AT+HTTPDATA=" + String(jsonBody.length()) + ",8000");
   delay(300);
 
-  // FIX: SIM7600 uses ">" not "DOWNLOAD"
   String dlResp = "";
   unsigned long dlT = millis();
   bool gotPrompt = false;
@@ -707,8 +768,11 @@ void fetchMedications() {
     JsonObject med = kv.value().as<JsonObject>();
     if (!med["active"].as<bool>()) continue;
 
-    slots[slotCount].id   = kv.key().c_str();
-    slots[slotCount].name = med["name"].as<String>();
+    slots[slotCount].id           = kv.key().c_str();
+    slots[slotCount].medicationId = med.containsKey("medicationId")
+                                      ? med["medicationId"].as<String>()
+                                      : String(kv.key().c_str());
+    slots[slotCount].name         = med["name"].as<String>();
 
     if (med.containsKey("hour")) {
       slots[slotCount].hour   = med["hour"].as<int>();
@@ -731,7 +795,6 @@ void fetchMedications() {
 
     slots[slotCount].pillCount = med["pillCount"] | 1;
 
-    // FIX: Days:0x0 — mask 0 නම් every day use කරනවා
     slots[slotCount].days = 0x7F;
     if (med.containsKey("days")) {
       JsonObject daysObj = med["days"].as<JsonObject>();
@@ -826,7 +889,7 @@ void updateDeviceStatus(bool connected) {
                 ",\"serverTime\":{\".sv\":\"timestamp\"}" +
                 ",\"signalStrength\":" + String(signal) +
                 ",\"model\":\"SmartDose SIM7600\"" +
-                ",\"firmware\":\"1.0.2\"}";
+                ",\"firmware\":\"1.0.4\"}";
 
   int httpStatus = firebasePut(String(DB_PATH) + "/device", json);
   if (httpStatus == 200) {
