@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
-import { ref, set } from 'firebase/database';
-import { addDoc, collection } from 'firebase/firestore';
+import { ref, remove, set } from 'firebase/database';
+import { addDoc, collection, deleteDoc, doc, getDocs, query, updateDoc, where } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert, Modal, Pressable, ScrollView, StatusBar, StyleSheet,
@@ -172,6 +172,7 @@ export default function ModalScreen() {
   const [color, setColor]         = useState(colors[0]);
   const [frequency, setFrequency] = useState('Once daily');
   const [times, setTimes]         = useState(['08:00']);
+  const [dosePillCounts, setDosePillCounts] = useState(['1']);
   const [mealPref, setMealPref]   = useState('No preference');
   const [totalPills, setTotal]    = useState('30');
   const [pillCount, setPillCount] = useState('1');
@@ -187,11 +188,59 @@ export default function ModalScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const loadCompartment = async () => {
+      const compNum = parseInt(compartment);
+      const snapshot = await getDocs(query(collection(db, 'medications'), where('compartment', '==', compNum)));
+      if (!active) return;
+
+      const data = snapshot.docs[0]?.data() as any;
+      if (!data) {
+        setName('');
+        setDosage('');
+        setTotal('30');
+        setFrequency('Once daily');
+        setTimes(['08:00']);
+        setDosePillCounts(['1']);
+        setPillCount('1');
+        setNotes('');
+        setColor(colors[compNum - 1] ?? colors[0]);
+        return;
+      }
+
+      const loadedTimes = Array.isArray(data.times) && data.times.length > 0
+        ? data.times
+        : [data.time ?? '08:00'];
+      const loadedCounts = Array.isArray(data.dosePillCounts) && data.dosePillCounts.length > 0
+        ? data.dosePillCounts.map((v: any) => String(v))
+        : loadedTimes.map(() => String(data.pillCount ?? 1));
+
+      setName(data.name ?? '');
+      setDosage(data.dosage ?? '');
+      setTotal(String(data.totalPills ?? data.currentPills ?? 30));
+      setFrequency(data.frequency ?? 'Once daily');
+      setTimes(loadedTimes);
+      setDosePillCounts(loadedCounts);
+      setPillCount(loadedCounts[0] ?? '1');
+      setNotes(data.notes ?? '');
+      setColor(data.color ?? colors[compNum - 1] ?? colors[0]);
+    };
+
+    loadCompartment().catch(console.error);
+    return () => { active = false; };
+  }, [compartment]);
+
   const updateFrequency = (freq: string) => {
     setFrequency(freq);
     const count = freq === 'Once daily' ? 1 : freq === 'Twice daily' ? 2 : freq === '3x daily' ? 3 : freq === '4x daily' ? 4 : 1;
     const defaultTimes = ['08:00', '12:00', '18:00', '22:00'];
     setTimes(defaultTimes.slice(0, count));
+    setDosePillCounts(prev => {
+      const next = [...prev];
+      while (next.length < count) next.push(next[next.length - 1] ?? '1');
+      return next.slice(0, count);
+    });
   };
 
   const openPicker = (index: number) => {
@@ -206,9 +255,16 @@ export default function ModalScreen() {
     setPickerVisible(false);
   };
 
+  const updateDosePillCount = (index: number, value: string) => {
+    const next = [...dosePillCounts];
+    next[index] = value;
+    setDosePillCounts(next);
+    setPillCount(value);
+  };
+
   const handleSave = async () => {
-    if (!name.trim() || !dosage.trim()) {
-      Alert.alert('Missing Info', 'Medicine name and dosage are required.');
+    if (!name.trim()) {
+      Alert.alert('Missing Info', 'Pill name is required.');
       return;
     }
     const compNum = parseInt(compartment);
@@ -219,29 +275,50 @@ export default function ModalScreen() {
 
     setLoading(true);
     try {
-      const docRef = await addDoc(collection(db, 'medications'), {
-        name: name.trim(), dosage: dosage.trim(),
-        compartment: compNum, color, frequency, times,
+      const doseCounts = times.map((_, i) => parseInt(dosePillCounts[i] ?? pillCount) || 1);
+      const existing = await getDocs(query(collection(db, 'medications'), where('compartment', '==', compNum)));
+      const existingDoc = existing.docs[0];
+      const payload = {
+        name: name.trim(), dosage: dosage.trim() || `${name.trim()} pills`,
+        compartment: compNum, color, frequency, times, dosePillCounts: doseCounts,
         time: times[0], mealPreference: mealPref,
         totalPills: parseInt(totalPills) || 30,
         currentPills: parseInt(totalPills) || 30,
-        pillCount: parseInt(pillCount) || 1,
+        pillCount: doseCounts[0] ?? 1,
         notes: notes.trim(), active: true, taken: false,
-      });
+      };
+
+      const docId = existingDoc?.id;
+      for (const oldDoc of existing.docs.slice(1)) {
+        await deleteDoc(doc(db, 'medications', oldDoc.id));
+        for (let i = 0; i < 8; i++) {
+          await remove(ref(rtdb, `medications/${oldDoc.id}_${i}`));
+        }
+      }
+
+      if (docId) {
+        await updateDoc(doc(db, 'medications', docId), payload);
+      }
+      const savedDoc = docId ? { id: docId } : await addDoc(collection(db, 'medications'), payload);
+
+      for (let i = 0; i < 8; i++) {
+        await remove(ref(rtdb, `medications/${savedDoc.id}_${i}`));
+      }
 
       for (let i = 0; i < times.length; i++) {
         const [hourStr, minuteStr] = times[i].split(':');
-        await set(ref(rtdb, `medications/${docRef.id}_${i}`), {
+        await set(ref(rtdb, `medications/${savedDoc.id}_${i}`), {
+          medicationId: savedDoc.id,
           name: name.trim(), time: times[i],
           hour: parseInt(hourStr) || 0,
           minute: parseInt(minuteStr) || 0,
           compartment: compNum,
-          pillCount: parseInt(pillCount) || 1,
+          pillCount: doseCounts[i] ?? 1,
           active: true, taken: false,
         });
       }
 
-      Alert.alert('Saved!', `${name.trim()} scheduled. Device will sync in up to 5 minutes.`);
+      Alert.alert('Saved!', `Compartment ${compNum} saved. Device will sync in up to 5 minutes.`);
       router.back();
     } catch (e) {
       Alert.alert('Error', 'Failed to save. Please try again.');
@@ -271,19 +348,20 @@ export default function ModalScreen() {
 
         {/* Basic Info */}
         <View style={s.section}>
-          <Text style={s.sectionTitle}>BASIC INFO</Text>
+          <Text style={s.sectionTitle}>COMPARTMENT PILL</Text>
           <TextInput
             style={s.input}
-            placeholder="Medicine name (e.g. Metformin)"
+            placeholder="Pill name (e.g. Panadol)"
             value={name}
             onChangeText={setName}
             placeholderTextColor={palette.textSoft}
           />
           <TextInput
             style={s.input}
-            placeholder="Dosage (e.g. 500mg)"
-            value={dosage}
-            onChangeText={setDosage}
+            placeholder="Total pills in this compartment (e.g. 30)"
+            value={totalPills}
+            onChangeText={setTotal}
+            keyboardType="numeric"
             placeholderTextColor={palette.textSoft}
           />
         </View>
@@ -291,7 +369,7 @@ export default function ModalScreen() {
         {/* Compartment */}
         <View style={s.section}>
           <Text style={s.sectionTitle}>COMPARTMENT</Text>
-          <Text style={s.sectionHint}>Which physical compartment holds this medicine?</Text>
+          <Text style={s.sectionHint}>Each compartment can hold one pill type.</Text>
           <View style={s.compRow}>
             {['1', '2', '3'].map(c => (
               <TouchableOpacity
@@ -302,26 +380,6 @@ export default function ModalScreen() {
               >
                 <Text style={[s.compNum, compartment === c && s.compNumSelected]}>C{c}</Text>
                 <Text style={[s.compLabel, compartment === c && s.compLabelSelected]}>Compartment {c}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Pills Per Dose */}
-        <View style={s.section}>
-          <Text style={s.sectionTitle}>PILLS PER DOSE</Text>
-          <Text style={s.sectionHint}>How many pills should the motor dispense each time?</Text>
-          <View style={s.pillRow}>
-            {PILL_COUNTS.map(p => (
-              <TouchableOpacity
-                key={p}
-                style={[s.pillBtn, pillCount === p && s.pillSelected]}
-                onPress={() => setPillCount(p)}
-                activeOpacity={0.75}
-              >
-                <Text style={[s.pillText, pillCount === p && s.pillTextSelected]}>
-                  {p} {p === '1' ? 'pill' : 'pills'}
-                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -361,55 +419,41 @@ export default function ModalScreen() {
 
         {/* Dose Times — tap to open picker */}
         <View style={s.section}>
-          <Text style={s.sectionTitle}>DOSE TIMES</Text>
-          <Text style={s.sectionHint}>Tap a time to change it. Device will dispense at these exact times.</Text>
+          <Text style={s.sectionTitle}>DOSE TIMES & PILLS</Text>
+          <Text style={s.sectionHint}>Set the time and pill count for this compartment.</Text>
           {times.map((t, i) => (
-            <TouchableOpacity
-              key={i}
-              style={s.timeBtn}
-              onPress={() => openPicker(i)}
-              activeOpacity={0.75}
-            >
-              <View>
-                <Text style={s.timeBtnLabel}>Dose {i + 1}</Text>
-                <Text style={s.timeBtnSub}>Tap to change</Text>
-              </View>
-              <View style={s.timeBtnRight}>
-                <Text style={s.timeBtnValue}>{t}</Text>
-                <Text style={s.timeBtnAmPm}>{parseInt(t.split(':')[0]) < 12 ? 'AM' : 'PM'}</Text>
-              </View>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Meal Preference */}
-        <View style={s.section}>
-          <Text style={s.sectionTitle}>MEAL PREFERENCE</Text>
-          <View style={s.optionRow}>
-            {MEAL_OPTIONS.map(m => (
+            <View key={i} style={s.doseRow}>
               <TouchableOpacity
-                key={m}
-                style={[s.optionBtn, mealPref === m && s.optionSelected]}
-                onPress={() => setMealPref(m)}
+                style={[s.timeBtn, { flex: 1, marginBottom: 0 }]}
+                onPress={() => openPicker(i)}
                 activeOpacity={0.75}
               >
-                <Text style={[s.optionText, mealPref === m && s.optionTextSelected]}>{m}</Text>
+                <View>
+                  <Text style={s.timeBtnLabel}>Dose {i + 1}</Text>
+                  <Text style={s.timeBtnSub}>Tap to change</Text>
+                </View>
+                <View style={s.timeBtnRight}>
+                  <Text style={s.timeBtnValue}>{t}</Text>
+                  <Text style={s.timeBtnAmPm}>{parseInt(t.split(':')[0]) < 12 ? 'AM' : 'PM'}</Text>
+                </View>
               </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Total pills */}
-        <View style={s.section}>
-          <Text style={s.sectionTitle}>TOTAL PILLS IN COMPARTMENT</Text>
-          <TextInput
-            style={s.input}
-            placeholder="e.g. 30"
-            value={totalPills}
-            onChangeText={setTotal}
-            keyboardType="numeric"
-            placeholderTextColor={palette.textSoft}
-          />
+              <View style={s.dosePills}>
+                <Text style={s.dosePillsLabel}>Pills</Text>
+                <View style={s.dosePillBtns}>
+                  {PILL_COUNTS.map(p => (
+                    <TouchableOpacity
+                      key={p}
+                      style={[s.dosePillBtn, (dosePillCounts[i] ?? pillCount) === p && s.dosePillSelected]}
+                      onPress={() => updateDosePillCount(i, p)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={[s.dosePillText, (dosePillCounts[i] ?? pillCount) === p && s.dosePillTextSelected]}>{p}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            </View>
+          ))}
         </View>
 
         {/* Notes */}
@@ -469,6 +513,14 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   timeBtnRight:{ alignItems: 'flex-end' },
   timeBtnValue:{ fontSize: 24, fontWeight: '900', color: P.primary },
   timeBtnAmPm: { fontSize: 12, fontWeight: '700', color: P.textMuted },
+  doseRow:     { flexDirection: 'row', alignItems: 'stretch', gap: 10, marginBottom: 10 },
+  dosePills:   { width: 92, backgroundColor: P.background, borderWidth: 1.5, borderColor: P.border, borderRadius: 12, padding: 8, justifyContent: 'center' },
+  dosePillsLabel:{ fontSize: 10, fontWeight: '800', color: P.textMuted, textAlign: 'center', marginBottom: 6, textTransform: 'uppercase' },
+  dosePillBtns:{ flexDirection: 'row', gap: 4, justifyContent: 'center' },
+  dosePillBtn: { width: 24, height: 28, borderRadius: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: P.surface, borderWidth: 1, borderColor: P.border },
+  dosePillSelected:{ backgroundColor: P.primary, borderColor: P.primary },
+  dosePillText:{ fontSize: 12, fontWeight: '800', color: P.textMuted },
+  dosePillTextSelected:{ color: '#fff' },
   // Compartment
   compRow:     { flexDirection: 'row', gap: 10 },
   compBtn:     { flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: P.background, alignItems: 'center', borderWidth: 1, borderColor: P.border },

@@ -1,6 +1,6 @@
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Bell, CheckCircle2, Clock, Plus, Trash2, Zap } from 'lucide-react-native';
+import { Bell, CheckCircle2, Circle, Clock, Plus, Trash2, XCircle, Zap } from 'lucide-react-native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert, Animated, Platform, ScrollView, StatusBar, StyleSheet, Text,
@@ -10,7 +10,7 @@ import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../consta
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
   deleteMedication, dispenseNow, listenESP32History,
-  listenMedications, markMedicationTaken, Medication,
+  listenMedications, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
 
@@ -22,18 +22,12 @@ const greeting = () => {
   return 'Good night';
 };
 
-function MedCard({ med, onTaken }: { med: Medication; onTaken: (id: string) => void }) {
+type DoseStatus = 'pending' | 'taken' | 'missed';
+
+function MedCard({ med, status }: { med: Medication; status: DoseStatus }) {
   const scale = useRef(new Animated.Value(1)).current;
   const { cbColors, palette } = useAccessibility();
   const s = useMemo(() => makeCardStyles(palette), [palette]);
-
-  const handlePress = () => {
-    Animated.sequence([
-      Animated.spring(scale, { toValue: 0.96, useNativeDriver: true, speed: 50 }),
-      Animated.spring(scale, { toValue: 1,    useNativeDriver: true, speed: 20 }),
-    ]).start();
-    onTaken(med.id);
-  };
 
   const handleDelete = async () => {
     if (Platform.OS === 'web') {
@@ -83,15 +77,21 @@ function MedCard({ med, onTaken }: { med: Medication; onTaken: (id: string) => v
       <TouchableOpacity style={s.deleteBtn} onPress={handleDelete} activeOpacity={0.7}>
         <Trash2 size={16} color="#ef4444" />
       </TouchableOpacity>
-      {med.taken ? (
+      {status === 'taken' ? (
         <View style={[s.takenBadge, { backgroundColor: cbColors.successSoft }]}>
           <CheckCircle2 size={14} color={cbColors.success} />
           <Text style={[s.takenTxt, { color: cbColors.success }]}>Taken</Text>
         </View>
+      ) : status === 'missed' ? (
+        <View style={[s.takenBadge, { backgroundColor: cbColors.dangerSoft }]}>
+          <XCircle size={14} color={cbColors.danger} />
+          <Text style={[s.takenTxt, { color: cbColors.danger }]}>Missed</Text>
+        </View>
       ) : (
-        <TouchableOpacity style={s.markBtn} onPress={handlePress} activeOpacity={0.75}>
-          <Text style={s.markBtnTxt}>Mark{'\n'}Taken</Text>
-        </TouchableOpacity>
+        <View style={[s.takenBadge, { backgroundColor: palette.background }]}>
+          <Circle size={14} color={palette.textSoft} />
+          <Text style={[s.takenTxt, { color: palette.textMuted }]}>Pending</Text>
+        </View>
       )}
     </Animated.View>
   );
@@ -101,6 +101,44 @@ const STATUS_MAP: Record<string, { label: string; icon: string; st: keyof typeof
   taken:          { label: 'Taken',  icon: '✓', st: 'taken'  },
   missed:         { label: 'Missed', icon: '✕', st: 'missed' },
   'auto-dispensed':{ label: 'Auto',  icon: '⟳', st: 'auto'   },
+  dispensed:      { label: 'Auto',   icon: '↓', st: 'auto'   },
+};
+
+const isDoseTakenStatus = (status?: string) =>
+  ['taken', 'dispensed', 'auto-dispensed'].includes(String(status ?? '').toLowerCase());
+
+const normalizeDoseStatus = (status?: string): DoseStatus | null => {
+  const normalized = String(status ?? '').toLowerCase();
+  if (isDoseTakenStatus(normalized)) return 'taken';
+  if (normalized === 'missed') return 'missed';
+  return null;
+};
+
+const isRecentHistoryItem = (item: any) => {
+  const seconds = Number(item.id);
+  if (!Number.isFinite(seconds)) return true;
+  const ageMs = Date.now() - seconds * 1000;
+  return ageMs >= 0 && ageMs < 24 * 60 * 60 * 1000;
+};
+
+const findMedicationForHistory = (meds: Medication[], item: any) => {
+  const medId = String(item.medicationId ?? item.medId ?? '');
+  const medName = String(item.medication ?? '').trim().toLowerCase();
+  const itemComp = Number(item.compartment);
+
+  return (
+    meds.find(m => medId && m.id === medId) ??
+    meds.find(m => medName && m.name.trim().toLowerCase() === medName) ??
+    meds.find(m => Number.isFinite(itemComp) && Number(m.compartment) === itemComp + 1) ??
+    meds.find(m => Number.isFinite(itemComp) && Number(m.compartment) === itemComp)
+  );
+};
+
+const getHistoryTime = (item: any) => {
+  const idSeconds = Number(item.id);
+  if (Number.isFinite(idSeconds)) return idSeconds * 1000;
+  const parsed = Date.parse(String(item.timestamp ?? item.lastSync ?? ''));
+  return Number.isFinite(parsed) ? parsed : 0;
 };
 
 function HistoryItem({ item }: { item: any }) {
@@ -138,8 +176,6 @@ export default function HomeScreen() {
   const s = useMemo(() => makeStyles(palette), [palette]);
 
   const medsRef             = useRef<Medication[]>([]);
-  const processedIds        = useRef<Set<string>>(new Set());
-  const historyInitialized  = useRef(false);
 
   useEffect(() => {
     const u1 = listenMedications((meds) => {
@@ -148,25 +184,9 @@ export default function HomeScreen() {
       scheduleReminders(meds);
     });
     const u2 = listenESP32History((h) => {
-      const filtered = [...h].filter(item => item.medication).reverse();
-
-      if (!historyInitialized.current) {
-        filtered.forEach(item => { if (item.id) processedIds.current.add(item.id); });
-        historyInitialized.current = true;
-      } else {
-        filtered.forEach(async (item) => {
-          if (!item.id || processedIds.current.has(item.id)) return;
-          processedIds.current.add(item.id);
-          if (item.status === 'taken' || item.status === 'auto-dispensed') {
-            const med =
-              medsRef.current.find(m => m.name.toLowerCase() === (item.medication ?? '').toLowerCase() && !m.taken) ??
-              medsRef.current.find(m => Number(m.compartment) === Number(item.compartment) + 1 && !m.taken);
-            if (med) {
-              try { await markMedicationTaken(med.id); } catch {}
-            }
-          }
-        });
-      }
+      const filtered = [...h]
+        .filter(item => item.medication)
+        .sort((a, b) => getHistoryTime(b) - getHistoryTime(a));
 
       setHistory(filtered.slice(0, 8));
     });
@@ -181,10 +201,6 @@ export default function HomeScreen() {
         await scheduleMedicationReminder(m.name, m.dosage, +hr, +mn);
       }
     }
-  };
-
-  const handleTaken = async (id: string) => {
-    await markMedicationTaken(id);
   };
 
   const handleDispenseNow = async (comp: number) => {
@@ -207,8 +223,28 @@ export default function HomeScreen() {
     );
   };
 
-  const taken   = medications.filter(m => m.taken);
-  const pending = medications.filter(m => !m.taken);
+  const doseStatusByMedicationId = useMemo(() => {
+    const result: Record<string, DoseStatus> = {};
+    const recentHistory = history.filter(isRecentHistoryItem);
+
+    for (const item of recentHistory) {
+      const status = normalizeDoseStatus(item.status);
+      if (!status) continue;
+      const med = findMedicationForHistory(medications, item);
+      if (med && !result[med.id]) {
+        result[med.id] = status;
+      }
+    }
+
+    return result;
+  }, [history, medications]);
+
+  const getDoseStatus = (med: Medication): DoseStatus =>
+    doseStatusByMedicationId[med.id] ?? (med.taken ? 'taken' : 'pending');
+
+  const taken   = medications.filter(m => getDoseStatus(m) === 'taken');
+  const missed  = medications.filter(m => getDoseStatus(m) === 'missed');
+  const pending = medications.filter(m => getDoseStatus(m) === 'pending');
   const total   = medications.length;
   const adherence = total > 0 ? Math.round((taken.length / total) * 100) : 0;
   const nextDose  = pending[0];
@@ -328,21 +364,21 @@ export default function HomeScreen() {
 
         <View style={s.section}>
           <View style={s.sectionRow}>
-            <Text style={s.sectionTitle}>Upcoming Doses</Text>
+            <Text style={s.sectionTitle}>Today's Doses</Text>
             <View style={s.sectionPill}>
-              <Text style={s.sectionPillTxt}>Next 6 hrs</Text>
+              <Text style={s.sectionPillTxt}>{taken.length} taken · {missed.length} missed</Text>
             </View>
           </View>
 
-          {pending.length === 0 ? (
+          {medications.length === 0 ? (
             <View style={s.emptyCard}>
               <CheckCircle2 size={32} color={palette.green} />
-              <Text style={s.emptyTitle}>All caught up!</Text>
-              <Text style={s.emptySub}>No pending doses for today</Text>
+              <Text style={s.emptyTitle}>No doses scheduled</Text>
+              <Text style={s.emptySub}>Add medications to see automatic dose status.</Text>
             </View>
           ) : (
-            pending.map(m => (
-              <MedCard key={m.id} med={m} onTaken={handleTaken} />
+            medications.map(m => (
+              <MedCard key={m.id} med={m} status={getDoseStatus(m)} />
             ))
           )}
         </View>

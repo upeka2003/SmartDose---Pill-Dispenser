@@ -102,7 +102,7 @@ int  firebasePut(String path, String jsonBody);
 void fetchMedications();
 void checkCommands();
 void updateDeviceStatus(bool connected = true);
-void logHistory(String medName, int comp, String status);
+void logHistory(String medId, String medName, int comp, String status);
 void checkMedicationTimes(DateTime now);
 void checkMissedDoses();
 void dispensePills(int compartment, int count);
@@ -249,6 +249,7 @@ void loop() {
       setRGB(0, 0, 1);
 
       String pendingNames[10];
+      String pendingIds[10];
       int pendingComps[10];
       int pendingCount = 0;
 
@@ -259,6 +260,7 @@ void loop() {
         Serial.println("Dispensing: " + slots[i].name);
         dispensePills(slots[i].compartment, slots[i].pillCount);
 
+        pendingIds[pendingCount] = slots[i].id;
         pendingNames[pendingCount] = slots[i].name;
         pendingComps[pendingCount] = slots[i].compartment;
         pendingCount++;
@@ -276,7 +278,7 @@ void loop() {
         lcdPrint("Syncing...", "Cloud update");
         setRGB(0, 0, 1);
         for (int i = 0; i < pendingCount; i++) {
-          logHistory(pendingNames[i], pendingComps[i], "taken");
+          logHistory(pendingIds[i], pendingNames[i], pendingComps[i], "taken");
           sendDoseNotification(pendingNames[i], "taken");
         }
         updateDeviceStatus(true);
@@ -445,7 +447,7 @@ void checkMissedDoses() {
   lcdPrint("Syncing...", "Cloud update");
   setRGB(0, 0, 1);
   for (int i = 0; i < missedCount; i++) {
-    logHistory(missedNames[i], missedComps[i], "missed");
+    logHistory("", missedNames[i], missedComps[i], "missed");
     sendDoseNotification(missedNames[i], "missed");
   }
   updateDeviceStatus(true);
@@ -849,7 +851,7 @@ void checkCommands() {
     dispensePills(comp, count);
     setRGB(0, 1, 0);
 
-    logHistory("Manual", comp, "dispensed");
+    logHistory("", "Manual", comp, "dispensed");
     sendDoseNotification("Manual Dispense", "dispensed");
 
     firebasePut(String(DB_PATH) + "/commands",
@@ -906,12 +908,13 @@ void updateDeviceStatus(bool connected) {
   }
 }
 
-void logHistory(String medName, int comp, String status) {
+void logHistory(String medId, String medName, int comp, String status) {
   DateTime now = rtc.now();
   String ts = pad(now.hour()) + ":" + pad(now.minute());
   String key = String(now.unixtime());
   String json = "{\"time\":\"" + ts +
                 "\",\"medication\":\"" + medName +
+                "\",\"medicationId\":\"" + medId +
                 "\",\"compartment\":" + String(comp) +
                 ",\"status\":\"" + status + "\"}";
   firebasePut(String(DB_PATH) + "/history/" + key, json);
