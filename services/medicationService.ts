@@ -63,10 +63,9 @@ export const listenMedications = (callback: (meds: Medication[]) => void) => {
 
 export const deleteMedication = async (id: string) => {
   await deleteDoc(doc(db, 'medications', id));
-  await remove(ref(rtdb, `medications/${id}_0`));
-  await remove(ref(rtdb, `medications/${id}_1`));
-  await remove(ref(rtdb, `medications/${id}_2`));
-  await remove(ref(rtdb, `medications/${id}_3`));
+  for (let i = 0; i < 8; i++) {
+    await remove(ref(rtdb, `smartdose/medications/${id}_${i}`));
+  }
 };
 
 export const markMedicationTaken = async (id: string) => {

@@ -16,8 +16,6 @@
 #define GSM_BAUD  115200
 #define APN       "dialogbb"
 
-// Firebase Realtime Database settings.
-// Keep your current DB secret here, or replace it with the new one if you rotate it.
 #define FIREBASE_HOST "smartdose-dcd88-default-rtdb.firebaseio.com"
 #define FIREBASE_AUTH "CZnwewbitQSo2RY8CvP6nf0lHbX4fAgwS7dZAKMi"
 #define DB_PATH       "/smartdose"
@@ -36,13 +34,11 @@
 #define STEP_DELAY_MS     2
 #define DISPENSE_DELAY_MS 3000
 
-// Real app mode: medication times come from the app/Firebase.
 #define DEMO_MODE false
 
 #define COMMAND_INTERVAL_MS       15000UL
 #define DEVICE_STATUS_INTERVAL_MS 60000UL
 #define MED_SYNC_INTERVAL_MS      300000UL
-#define MISSED_WINDOW_MS          300000UL
 #define DOOR_AUTO_CLOSE_MS        120000UL
 
 RTC_DS3231 rtc;
@@ -67,10 +63,10 @@ struct MedSlot {
   int minute;
   int compartment;
   int pillCount;
+  uint8_t days;
   bool active;
   bool triggered;
   bool waitingConfirm;
-  unsigned long alertStartTime;
 };
 
 MedSlot slots[10];
@@ -98,13 +94,12 @@ void IRAM_ATTR handleButton() {
 
 void connectGSM();
 String firebaseGet(String path);
-int  firebasePut(String path, String jsonBody);
+int firebasePut(String path, String jsonBody);
 void fetchMedications();
 void checkCommands();
 void updateDeviceStatus(bool connected = true);
 void logHistory(String medId, String medName, int comp, String status);
 void checkMedicationTimes(DateTime now);
-void checkMissedDoses();
 void dispensePills(int compartment, int count);
 void lcdPrint(String line1, String line2);
 void buzzerAlert(int beeps);
@@ -230,94 +225,31 @@ void loop() {
   String dateStr = pad(now.day()) + "/" + pad(now.month()) + "/" + pad(now.year() % 100);
 
   if (!doorOpen) {
-    if (currentDoseIndex >= 0 && slots[currentDoseIndex].waitingConfirm) {
-      lcdPrint(slots[currentDoseIndex].name, "Press dispense");
-    } else {
-      lcdPrint("SD " + timeStr + " " + dateStr, "Running...");
-    }
+    lcdPrint("SD " + timeStr + " " + dateStr, "Ready");
   }
 
   if (buttonPressed) {
     buttonPressed = false;
     Serial.println("BUTTON PRESSED");
-
-    if (currentDoseIndex >= 0) {
-      lcdPrint("Door Opening", "Please wait...");
-      openDoor();
-      buzzerAlert(2);
-      delay(DISPENSE_DELAY_MS);
-      setRGB(0, 0, 1);
-
-      String pendingNames[10];
-      String pendingIds[10];
-      int pendingComps[10];
-      int pendingCount = 0;
-
-      for (int i = 0; i < slotCount; i++) {
-        if (!slots[i].waitingConfirm) continue;
-
-        lcdPrint("Dispensing...", "Please Wait");
-        Serial.println("Dispensing: " + slots[i].name);
-        dispensePills(slots[i].compartment, slots[i].pillCount);
-
-        pendingIds[pendingCount] = slots[i].id;
-        pendingNames[pendingCount] = slots[i].name;
-        pendingComps[pendingCount] = slots[i].compartment;
-        pendingCount++;
-
-        slots[i].waitingConfirm = false;
-        slots[i].triggered = true;
-      }
-
-      lcdPrint("Dose Taken!", "Well done!");
-      setRGB(0, 1, 0);
-      currentDoseIndex = -1;
-      handleDoorAutoClose();
-
-      if (pendingCount > 0) {
-        lcdPrint("Syncing...", "Cloud update");
-        setRGB(0, 0, 1);
-        for (int i = 0; i < pendingCount; i++) {
-          logHistory(pendingIds[i], pendingNames[i], pendingComps[i], "taken");
-          sendDoseNotification(pendingNames[i], "taken");
-        }
-        updateDeviceStatus(true);
-        setRGB(0, 1, 0);
-        lcdPrint("SmartDose", "Ready!");
-      }
-    }
+    Serial.println("Time: " + timeStr + " | Slots: " + String(slotCount));
   }
 
-  if (currentDoseIndex < 0) {
-    if (millis() - lastCmd > COMMAND_INTERVAL_MS) {
-      checkCommands();
-      lastCmd = millis();
-    }
+  if ((unsigned long)(millis() - lastCmd) > COMMAND_INTERVAL_MS) {
+    checkCommands();
+    lastCmd = millis();
+  }
 
-    if (millis() - lastMedSync > MED_SYNC_INTERVAL_MS) {
-      fetchMedications();
-      lastMedSync = millis();
-    }
+  if ((unsigned long)(millis() - lastMedSync) > MED_SYNC_INTERVAL_MS) {
+    fetchMedications();
+    lastMedSync = millis();
+  }
 
-    if (millis() - lastDeviceStatus > DEVICE_STATUS_INTERVAL_MS) {
-      updateDeviceStatus(true);
-      lastDeviceStatus = millis();
-    }
+  if ((unsigned long)(millis() - lastDeviceStatus) > DEVICE_STATUS_INTERVAL_MS) {
+    updateDeviceStatus(true);
+    lastDeviceStatus = millis();
   }
 
   checkMedicationTimes(rtc.now());
-  checkMissedDoses();
-
-  if (currentDoseIndex >= 0 && slots[currentDoseIndex].waitingConfirm) {
-    static unsigned long lastBeep = 0;
-    if (millis() - lastBeep > 30000) {
-      buzzerAlert(2);
-      setRGB(1, 1, 0);
-      delay(200);
-      setRGB(1, 0, 0);
-      lastBeep = millis();
-    }
-  }
 
   static int lastDay = -1;
   if (now.day() != lastDay) {
@@ -345,7 +277,7 @@ void loop() {
 
 void handleDoorAutoClose() {
   unsigned long doorOpenTime = millis();
-  while (millis() - doorOpenTime < DOOR_AUTO_CLOSE_MS) {
+  while ((unsigned long)(millis() - doorOpenTime) < DOOR_AUTO_CLOSE_MS) {
     esp_task_wdt_reset();
     int remaining = (DOOR_AUTO_CLOSE_MS - (millis() - doorOpenTime)) / 1000;
     lcdPrint("Door Open", "Close in " + String(remaining) + "s");
@@ -363,92 +295,71 @@ void handleDoorAutoClose() {
 }
 
 void checkMedicationTimes(DateTime now) {
-  bool anyNew = false;
-
   static bool demoFired = false;
+
+  int matched[10];
+  int matchedCount = 0;
+
   if (DEMO_MODE && !demoFired && slotCount > 0) {
     for (int i = 0; i < slotCount; i++) {
       if (!slots[i].active || slots[i].triggered) continue;
-      slots[i].waitingConfirm = true;
-      slots[i].alertStartTime = millis();
-      if (!anyNew) {
-        currentDoseIndex = i;
-        anyNew = true;
-      }
+      matched[matchedCount++] = i;
     }
     demoFired = true;
   } else if (!DEMO_MODE) {
+    uint8_t todayBit = (1 << now.dayOfTheWeek());
     for (int i = 0; i < slotCount; i++) {
       if (!slots[i].triggered &&
           !slots[i].waitingConfirm &&
           slots[i].active &&
-          now.hour() == slots[i].hour &&
+          (slots[i].days & todayBit) &&
+          now.hour()   == slots[i].hour &&
           now.minute() == slots[i].minute) {
-        slots[i].waitingConfirm = true;
-        slots[i].alertStartTime = millis();
-        Serial.println("Alert: " + slots[i].name);
-        if (!anyNew) {
-          currentDoseIndex = i;
-          anyNew = true;
-        }
+        matched[matchedCount++] = i;
+        Serial.println("Time match: " + slots[i].name +
+                       " C:" + String(slots[i].compartment + 1));
       }
     }
   }
 
-  if (anyNew) {
-    setRGB(1, 0, 0);
-    buzzerAlert(3);
-    Serial.println("Waiting for button...");
+  if (matchedCount == 0) return;
+
+  for (int j = 0; j < matchedCount; j++) {
+    slots[matched[j]].triggered = true;
+    slots[matched[j]].waitingConfirm = false;
   }
-}
-
-void checkMissedDoses() {
-  String missedNames[10];
-  int missedComps[10];
-  int missedCount = 0;
-
-  for (int i = 0; i < slotCount; i++) {
-    if (!slots[i].waitingConfirm) continue;
-    if (millis() - slots[i].alertStartTime <= MISSED_WINDOW_MS) continue;
-
-    missedNames[missedCount] = slots[i].name;
-    missedComps[missedCount] = slots[i].compartment;
-    missedCount++;
-
-    slots[i].waitingConfirm = false;
-    slots[i].triggered = true;
-  }
-
-  if (missedCount == 0) return;
-
-  lcdPrint("Time's up!", "Missed: " + missedNames[0]);
-  buzzerAlert(3);
-  for (int f = 0; f < 6; f++) {
-    setRGB(1, 0, 0);
-    delay(250);
-    setRGB(0, 0, 0);
-    delay(250);
-  }
-
-  int stillWaiting = -1;
-  for (int i = 0; i < slotCount; i++) {
-    if (slots[i].waitingConfirm) {
-      stillWaiting = i;
-      break;
-    }
-  }
-
-  if (stillWaiting >= 0) {
-    currentDoseIndex = stillWaiting;
-    return;
-  }
-
   currentDoseIndex = -1;
+
+  setRGB(1, 0, 0);
+  buzzerAlert(3);
+  lcdPrint("Dose Time!", "Dispensing...");
+  openDoor();
+  delay(DISPENSE_DELAY_MS);
+  setRGB(0, 0, 1);
+
+  String names[10]; String ids[10]; int comps[10];
+  for (int j = 0; j < matchedCount; j++) {
+    int i = matched[j];
+    lcdPrint("Dispensing...", slots[i].name.substring(0, 16));
+    Serial.println("Dispensing: " + slots[i].name +
+                   " C:" + String(slots[i].compartment + 1) +
+                   " x" + String(slots[i].pillCount));
+    dispensePills(slots[i].compartment, slots[i].pillCount);
+    names[j] = slots[i].name;
+    ids[j]   = slots[i].id;
+    comps[j] = slots[i].compartment;
+  }
+
+  lcdPrint("Take your pills!", "Door closing...");
+  setRGB(0, 1, 0);
+  buzzerAlert(2);
+  handleDoorAutoClose();
+
   lcdPrint("Syncing...", "Cloud update");
   setRGB(0, 0, 1);
-  for (int i = 0; i < missedCount; i++) {
-    logHistory("", missedNames[i], missedComps[i], "missed");
-    sendDoseNotification(missedNames[i], "missed");
+  for (int j = 0; j < matchedCount; j++) {
+    logHistory(ids[j], names[j], comps[j], "taken");
+    sendDoseNotification(names[j], "taken");
   }
   updateDeviceStatus(true);
   setRGB(0, 1, 0);
@@ -518,7 +429,6 @@ void connectGSM() {
   Serial.println("Modem: " + modem.getModemInfo());
   lcdPrint("Connecting...", "Network...");
 
-  // Enable automatic network time sync BEFORE registering on the network
   gsmSerial.println("AT+CLTS=1");
   delay(500);
   gsmSerial.println("AT+CTZU=1");
@@ -551,7 +461,6 @@ void connectGSM() {
   setRGB(0, 1, 0);
   Serial.println("GPRS OK! IP: " + modem.localIP().toString());
 
-  // Try AT+CCLK? up to 3 times — network may need a moment to provide time
   bool timeSynced = false;
   for (int attempt = 0; attempt < 3 && !timeSynced; attempt++) {
     esp_task_wdt_reset();
@@ -560,13 +469,15 @@ void connectGSM() {
     delay(2000);
     String timeResp = "";
     unsigned long t = millis();
-    while (millis() - t < 3000) {
+    while ((unsigned long)(millis() - t) < 3000) {
       while (gsmSerial.available()) timeResp += (char)gsmSerial.read();
     }
 
+    Serial.println("CCLK raw: " + timeResp);
+
     int idx = timeResp.indexOf("+CCLK:");
     if (idx != -1) {
-      String tp = timeResp.substring(idx + 8, idx + 25);
+      String tp = timeResp.substring(idx + 8, idx + 28);
       int yr = tp.substring(0, 2).toInt() + 2000;
       int mo = tp.substring(3, 5).toInt();
       int dy = tp.substring(6, 8).toInt();
@@ -574,7 +485,6 @@ void connectGSM() {
       int mn = tp.substring(12, 14).toInt();
       int sc = tp.substring(15, 17).toInt();
 
-      // Sanity check: year must be 2020 or later
       if (yr >= 2020 && mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31) {
         rtc.adjust(DateTime(yr, mo, dy, hr, mn, sc));
         lcdPrint("Time Synced!", pad(hr) + ":" + pad(mn));
@@ -585,32 +495,29 @@ void connectGSM() {
       }
     }
     if (!timeSynced) {
-      Serial.println("Time sync attempt " + String(attempt + 1) + " failed, retrying...");
+      Serial.println("Time sync attempt " + String(attempt + 1) + " failed.");
     }
   }
 
   if (!timeSynced) {
-    Serial.println("Warning: RTC not synced from network. Timestamps may be inaccurate.");
+    Serial.println("Warning: using existing RTC time.");
     lcdPrint("Time sync fail", "Using RTC time");
     delay(1000);
   }
 
-  // ── Firebase connectivity test ────────────────────────────────────────
   lcdPrint("Testing...", "Firebase conn");
-  Serial.println("Testing Firebase connectivity...");
   int testStatus = firebasePut(String(DB_PATH) + "/ping", "{\"ping\":true}");
   if (testStatus == 200) {
     lcdPrint("Firebase OK!", "Connected");
-    Serial.println("Firebase connection test PASSED.");
+    Serial.println("Firebase PASSED.");
     delay(1500);
   } else if (testStatus == 401 || testStatus == 403) {
-    lcdPrint("Firebase AUTH", "FAILED! Chk key");
-    Serial.println("CRITICAL: Firebase auth failed (HTTP " + String(testStatus) + ").");
-    Serial.println("Check FIREBASE_AUTH token in firmware.");
+    lcdPrint("Firebase AUTH", "FAILED!");
+    Serial.println("Firebase auth failed HTTP " + String(testStatus));
     delay(3000);
   } else {
     lcdPrint("Firebase FAIL", "HTTP:" + String(testStatus));
-    Serial.println("Firebase test failed (HTTP " + String(testStatus) + "). Check network.");
+    Serial.println("Firebase failed HTTP " + String(testStatus));
     delay(2000);
   }
 }
@@ -627,24 +534,39 @@ String firebaseGet(String path) {
   gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(600);
   gsmSerial.println("AT+HTTPACTION=0");
 
-  // Wait up to 20 seconds for +HTTPACTION URC
   String response = "";
   unsigned long t = millis();
-  while (millis() - t < 20000) {
+  while ((unsigned long)(millis() - t) < 20000) {
     esp_task_wdt_reset();
     while (gsmSerial.available()) response += (char)gsmSerial.read();
     if (response.indexOf("+HTTPACTION:") != -1) break;
   }
 
-  gsmSerial.println("AT+HTTPREAD=0,4000");
+  gsmSerial.println("AT+HTTPREAD=0,8000");
   String body = "";
   t = millis();
-  while (millis() - t < 5000) {
+  while ((unsigned long)(millis() - t) < 5000) {
     esp_task_wdt_reset();
     while (gsmSerial.available()) body += (char)gsmSerial.read();
   }
 
   gsmSerial.println("AT+HTTPTERM"); delay(600);
+
+  // Parse and print HTTP status from +HTTPACTION: response
+  int haIdx = response.indexOf("+HTTPACTION:");
+  if (haIdx != -1) {
+    int commaA = response.indexOf(',', haIdx);
+    int commaB = response.indexOf(',', commaA + 1);
+    if (commaA != -1 && commaB != -1) {
+      int httpStatus = response.substring(commaA + 1, commaB).toInt();
+      Serial.println("GET " + path + " -> HTTP " + String(httpStatus));
+    }
+  } else {
+    Serial.println("GET " + path + " -> no +HTTPACTION (timeout?)");
+  }
+
+  Serial.println("Body len: " + String(body.length()));
+  Serial.println("Body: " + body.substring(0, min((int)body.length(), 80)));
 
   int objStart = body.indexOf('{');
   int objEnd = body.lastIndexOf('}');
@@ -658,14 +580,19 @@ String firebaseGet(String path) {
     return body.substring(arrStart, arrEnd + 1);
   }
 
+  // Firebase returns literal "null" for empty/non-existent paths — not a network error
+  if (body.indexOf("null") != -1) {
+    return "null";
+  }
+
   return "";
 }
 
-// Returns HTTP status code (200 = OK, 401 = auth error, 0 = network/timeout fail)
+// FIX: SIM7600 ">" prompt + Days:0x0 fix
 int firebasePut(String path, String jsonBody) {
   if (!modem.isGprsConnected()) connectGSM();
   if (!modem.isGprsConnected()) {
-    Serial.println("PUT FAIL: no GPRS for " + path);
+    Serial.println("PUT FAIL: no GPRS");
     return 0;
   }
 
@@ -676,32 +603,42 @@ int firebasePut(String path, String jsonBody) {
   gsmSerial.println("AT+HTTPPARA=\"CID\",1"); delay(600);
   gsmSerial.println("AT+HTTPPARA=\"URL\",\"" + url + "\""); delay(600);
   gsmSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\""); delay(600);
-  gsmSerial.println("AT+HTTPDATA=" + String(jsonBody.length()) + ",8000"); delay(300);
+  gsmSerial.println("AT+HTTPDATA=" + String(jsonBody.length()) + ",8000");
+  delay(300);
 
-  // Wait for "DOWNLOAD" prompt before sending body (SIM7600 requires this)
+  // FIX: SIM7600 uses ">" not "DOWNLOAD"
   String dlResp = "";
   unsigned long dlT = millis();
-  while (millis() - dlT < 4000) {
+  bool gotPrompt = false;
+  while ((unsigned long)(millis() - dlT) < 5000) {
     esp_task_wdt_reset();
-    while (gsmSerial.available()) dlResp += (char)gsmSerial.read();
-    if (dlResp.indexOf("DOWNLOAD") != -1) break;
+    while (gsmSerial.available()) {
+      char c = gsmSerial.read();
+      dlResp += c;
+    }
+    if (dlResp.indexOf(">") != -1 || dlResp.indexOf("DOWNLOAD") != -1) {
+      gotPrompt = true;
+      break;
+    }
     if (dlResp.indexOf("ERROR") != -1) {
-      Serial.println("AT+HTTPDATA ERROR: " + dlResp);
+      Serial.println("HTTPDATA ERROR: " + dlResp);
       gsmSerial.println("AT+HTTPTERM"); delay(500);
       return 0;
     }
+    delay(50);
   }
-  Serial.println("DOWNLOAD prompt: " + dlResp);
+
+  Serial.println("Prompt: [" + dlResp + "]");
+  if (!gotPrompt) Serial.println("No prompt, sending anyway...");
 
   gsmSerial.print(jsonBody);
-  delay(500);
+  delay(1000);
 
   gsmSerial.println("AT+HTTPACTION=1");
 
-  // Wait up to 20 seconds for +HTTPACTION URC (larger payloads can take longer)
   String response = "";
   unsigned long t = millis();
-  while (millis() - t < 20000) {
+  while ((unsigned long)(millis() - t) < 25000) {
     esp_task_wdt_reset();
     while (gsmSerial.available()) response += (char)gsmSerial.read();
     if (response.indexOf("+HTTPACTION:") != -1) break;
@@ -709,7 +646,6 @@ int firebasePut(String path, String jsonBody) {
 
   gsmSerial.println("AT+HTTPTERM"); delay(600);
 
-  // Parse "+HTTPACTION: 1,<status>,<len>"
   int httpStatus = 0;
   int actionIdx = response.indexOf("+HTTPACTION:");
   if (actionIdx != -1) {
@@ -724,10 +660,10 @@ int firebasePut(String path, String jsonBody) {
 
   if (httpStatus == 401 || httpStatus == 403) {
     lcdPrint("Firebase Auth", "ERR " + String(httpStatus));
-    Serial.println("ERROR: Firebase auth rejected (HTTP " + String(httpStatus) + "). Check FIREBASE_AUTH.");
+    Serial.println("Auth error. Check FIREBASE_AUTH.");
     delay(2000);
   } else if (httpStatus == 0) {
-    Serial.println("WARNING: No +HTTPACTION response received. Modem/network issue.");
+    Serial.println("No +HTTPACTION response.");
     lcdPrint("No Response", "Check GSM");
     delay(1500);
   }
@@ -737,44 +673,33 @@ int firebasePut(String path, String jsonBody) {
 
 void fetchMedications() {
   Serial.println("Fetching medications...");
-  String body = firebaseGet("/medications");
+  String body = firebaseGet(String(DB_PATH) + "/medications");
 
-  if (body == "" || body == "null") {
-    Serial.println("No medications found.");
+  if (body == "") {
+    Serial.println("Network fail, keeping " + String(slotCount) + " cached slot(s).");
+    return;
+  }
+  if (body == "null") {
+    Serial.println("No medications in Firebase.");
     slotCount = 0;
     return;
   }
 
-  struct InFlight {
-    String id;
-    bool triggered;
-    bool waitingConfirm;
-    unsigned long alertStartTime;
-  };
-
+  struct InFlight { String id; bool triggered; };
   InFlight saved[10];
   int savedCount = 0;
   for (int i = 0; i < slotCount && savedCount < 10; i++) {
-    if (slots[i].triggered || slots[i].waitingConfirm) {
-      saved[savedCount++] = {
-        slots[i].id,
-        slots[i].triggered,
-        slots[i].waitingConfirm,
-        slots[i].alertStartTime
-      };
-    }
+    if (slots[i].triggered) saved[savedCount++] = { slots[i].id, true };
   }
 
-  StaticJsonDocument<4096> doc;
+  DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
-    Serial.print("Medication JSON parse failed: ");
-    Serial.println(err.c_str());
+    Serial.println("JSON parse failed: " + String(err.c_str()));
     return;
   }
 
   slotCount = 0;
-  int newCurrentDoseIndex = -1;
 
   for (JsonPair kv : doc.as<JsonObject>()) {
     if (slotCount >= 10) break;
@@ -782,20 +707,20 @@ void fetchMedications() {
     JsonObject med = kv.value().as<JsonObject>();
     if (!med["active"].as<bool>()) continue;
 
-    slots[slotCount].id = kv.key().c_str();
+    slots[slotCount].id   = kv.key().c_str();
     slots[slotCount].name = med["name"].as<String>();
 
     if (med.containsKey("hour")) {
-      slots[slotCount].hour = med["hour"].as<int>();
+      slots[slotCount].hour   = med["hour"].as<int>();
       slots[slotCount].minute = med["minute"].as<int>();
     } else {
       String t = med["time"].as<String>();
-      slots[slotCount].hour = t.substring(0, 2).toInt();
+      slots[slotCount].hour   = t.substring(0, 2).toInt();
       slots[slotCount].minute = t.substring(3, 5).toInt();
     }
 
     if (DEMO_MODE && demoHour >= 0) {
-      slots[slotCount].hour = demoHour;
+      slots[slotCount].hour   = demoHour;
       slots[slotCount].minute = demoMinute;
     }
 
@@ -805,17 +730,29 @@ void fetchMedications() {
     if (slots[slotCount].compartment > 2) slots[slotCount].compartment = 2;
 
     slots[slotCount].pillCount = med["pillCount"] | 1;
-    slots[slotCount].active = true;
-    slots[slotCount].triggered = false;
+
+    // FIX: Days:0x0 — mask 0 නම් every day use කරනවා
+    slots[slotCount].days = 0x7F;
+    if (med.containsKey("days")) {
+      JsonObject daysObj = med["days"].as<JsonObject>();
+      uint8_t mask = 0;
+      for (JsonPair dp : daysObj) {
+        int idx = String(dp.key().c_str()).toInt();
+        if (idx >= 0 && idx <= 6 && dp.value().as<bool>()) {
+          mask |= (1 << idx);
+        }
+      }
+      slots[slotCount].days = (mask == 0) ? 0x7F : mask;
+    }
+
+    slots[slotCount].active        = true;
+    slots[slotCount].triggered     = false;
     slots[slotCount].waitingConfirm = false;
-    slots[slotCount].alertStartTime = 0;
 
     for (int j = 0; j < savedCount; j++) {
       if (saved[j].id == slots[slotCount].id) {
         slots[slotCount].triggered = saved[j].triggered;
-        slots[slotCount].waitingConfirm = saved[j].waitingConfirm;
-        slots[slotCount].alertStartTime = saved[j].alertStartTime;
-        if (saved[j].waitingConfirm) newCurrentDoseIndex = slotCount;
+        Serial.println("Restored triggered: " + slots[slotCount].id);
         break;
       }
     }
@@ -823,12 +760,13 @@ void fetchMedications() {
     Serial.println("Loaded: " + slots[slotCount].name +
                    " " + pad(slots[slotCount].hour) + ":" + pad(slots[slotCount].minute) +
                    " C:" + String(slots[slotCount].compartment + 1) +
-                   " Pills:" + String(slots[slotCount].pillCount));
+                   " Pills:" + String(slots[slotCount].pillCount) +
+                   " Days:0x" + String(slots[slotCount].days, HEX));
 
     slotCount++;
   }
 
-  currentDoseIndex = newCurrentDoseIndex;
+  currentDoseIndex = -1;
   Serial.println(String(slotCount) + " medication slots loaded.");
 }
 
@@ -840,7 +778,7 @@ void checkCommands() {
   if (deserializeJson(doc, body)) return;
 
   if (doc["dispenseNow"].as<bool>()) {
-    int comp = doc["compartment"].as<int>();
+    int comp  = doc["compartment"].as<int>();
     int count = doc["pillCount"] | 1;
     if (comp < 0) comp = 0;
     if (comp > 2) comp = 2;
@@ -876,18 +814,10 @@ void updateDeviceStatus(bool connected) {
   DateTime now = rtc.now();
   String iso = String(now.year()) + "-" + pad(now.month()) + "-" + pad(now.day()) +
                "T" + pad(now.hour()) + ":" + pad(now.minute()) + ":" + pad(now.second()) + "Z";
-
-  // Use millis()-based server epoch for lastSyncMs so the app's freshness check
-  // isn't affected by RTC timezone/clock issues.  We store the RTC ISO for display
-  // and a millis-delta timestamp that the app compares against Date.now().
-  // Because we can't know the true epoch from millis alone, we use unixtime() but
-  // also write a separate "uptimeMs" field the app can use as a liveness proof.
   String lastSyncMs = String((uint64_t)now.unixtime() * 1000ULL);
   String uptimeMs   = String(millis());
   int signal = modem.getSignalQuality();
 
-  // {".sv":"timestamp"} tells Firebase to write the server's own UTC timestamp.
-  // The app compares this against Date.now() for real-time online/offline detection.
   String json = "{\"connected\":" + String(connected ? "true" : "false") +
                 ",\"battery\":100" +
                 ",\"lastSync\":\"" + iso + "\"" +
@@ -896,11 +826,11 @@ void updateDeviceStatus(bool connected) {
                 ",\"serverTime\":{\".sv\":\"timestamp\"}" +
                 ",\"signalStrength\":" + String(signal) +
                 ",\"model\":\"SmartDose SIM7600\"" +
-                ",\"firmware\":\"1.0.0\"}";
+                ",\"firmware\":\"1.0.2\"}";
 
   int httpStatus = firebasePut(String(DB_PATH) + "/device", json);
   if (httpStatus == 200) {
-    Serial.println("Device status OK -> Firebase /device updated.");
+    Serial.println("Device status OK.");
   } else {
     Serial.println("Device status FAILED! HTTP=" + String(httpStatus));
     lcdPrint("Status FAIL", "HTTP:" + String(httpStatus));
@@ -910,7 +840,7 @@ void updateDeviceStatus(bool connected) {
 
 void logHistory(String medId, String medName, int comp, String status) {
   DateTime now = rtc.now();
-  String ts = pad(now.hour()) + ":" + pad(now.minute());
+  String ts  = pad(now.hour()) + ":" + pad(now.minute());
   String key = String(now.unixtime());
   String json = "{\"time\":\"" + ts +
                 "\",\"medication\":\"" + medName +
@@ -930,43 +860,42 @@ void handleSerialCommand(String cmd) {
     Serial.println("All motors stopped.");
   } else if (cmd.startsWith("run ")) {
     int sp1 = cmd.indexOf(' ', 4);
-    if (sp1 == -1) {
-      Serial.println("Usage: run <0|1|2> <rotations> [cw|ccw]");
-      return;
-    }
-
+    if (sp1 == -1) { Serial.println("Usage: run <0|1|2> <n> [cw|ccw]"); return; }
     int motor = cmd.substring(4, sp1).toInt();
     int sp2 = cmd.indexOf(' ', sp1 + 1);
-    int rots;
-    bool cw;
-
+    int rots; bool cw;
     if (sp2 == -1) {
-      rots = cmd.substring(sp1 + 1).toInt();
-      cw = true;
+      rots = cmd.substring(sp1 + 1).toInt(); cw = true;
     } else {
       rots = cmd.substring(sp1 + 1, sp2).toInt();
       String dir = cmd.substring(sp2 + 1);
       dir.toLowerCase();
       cw = (dir != "ccw");
     }
-
-    if (motor < 0 || motor > 2 || rots < 1) {
-      Serial.println("Invalid motor or rotations.");
-      return;
-    }
+    if (motor < 0 || motor > 2 || rots < 1) { Serial.println("Invalid."); return; }
     runMotorTest(motor, rots, cw);
   } else if (cmd == "sync") {
     fetchMedications();
     updateDeviceStatus(true);
   } else if (cmd == "status") {
     updateDeviceStatus(true);
+  } else if (cmd == "time") {
+    DateTime now = rtc.now();
+    Serial.println("RTC: " + pad(now.hour()) + ":" + pad(now.minute()) + ":" + pad(now.second()));
+    Serial.println("Date: " + pad(now.day()) + "/" + pad(now.month()) + "/" + String(now.year()));
+    Serial.println("DayOfWeek: " + String(now.dayOfTheWeek()) + " (0=Sun)");
+  } else if (cmd == "slots") {
+    Serial.println("Slots: " + String(slotCount));
+    for (int i = 0; i < slotCount; i++) {
+      Serial.println("  [" + String(i) + "] " + slots[i].name +
+                     " " + pad(slots[i].hour) + ":" + pad(slots[i].minute) +
+                     " C:" + String(slots[i].compartment + 1) +
+                     " Days:0x" + String(slots[i].days, HEX) +
+                     " triggered:" + String(slots[i].triggered));
+    }
   } else if (cmd == "help") {
-    Serial.println("Commands:");
-    Serial.println("  run <0|1|2> <n> [cw|ccw]");
-    Serial.println("  stop");
-    Serial.println("  sync");
-    Serial.println("  status");
+    Serial.println("Commands: run | stop | sync | status | time | slots");
   } else {
-    Serial.println("Unknown command. Type help.");
+    Serial.println("Unknown. Type help.");
   }
 }
