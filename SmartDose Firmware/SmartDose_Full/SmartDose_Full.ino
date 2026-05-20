@@ -40,7 +40,7 @@
 #define DEVICE_STATUS_INTERVAL_MS 60000UL
 #define MED_SYNC_INTERVAL_MS      300000UL
 #define DOOR_AUTO_CLOSE_MS        120000UL
-#define DOSE_CONFIRM_TIMEOUT_MS   1800000UL  // 30 minutes
+#define DOSE_CONFIRM_TIMEOUT_MS   1800000UL
 
 RTC_DS3231 rtc;
 PCF8575 pcf(0x20);
@@ -58,8 +58,8 @@ int stepSeq[4][4] = {
 };
 
 struct MedSlot {
-  String id;           // RTDB slot key e.g. "abc123_0"
-  String medicationId; // Firestore doc ID e.g. "abc123"
+  String id;
+  String medicationId;
   String name;
   int hour;
   int minute;
@@ -250,7 +250,6 @@ void loop() {
       return;
     }
 
-    // සෑම 30s වරක් buzzer reminder
     if ((unsigned long)(millis() - lastBeepMs) > 30000UL) {
       buzzerAlert(2);
       int remaining = (int)((DOSE_CONFIRM_TIMEOUT_MS - (unsigned long)(millis() - alertStartMs)) / 60000UL);
@@ -259,7 +258,6 @@ void loop() {
       lastBeepMs = millis();
     }
 
-    // 30 minutes timeout — missed
     if ((unsigned long)(millis() - alertStartMs) > DOSE_CONFIRM_TIMEOUT_MS) {
       Serial.println("Dose missed (30min timeout)");
       waitingForButton = false;
@@ -272,8 +270,9 @@ void loop() {
         int mi = pendingMatched[j];
         logHistory(slots[mi].medicationId, slots[mi].name, slots[mi].compartment, "missed");
         sendDoseNotification(slots[mi].name, "missed");
-        // App එකේ real-time update සඳහා lastStatus write කරනවා
-        firebasePut(String(DB_PATH) + "/medications/" + slots[mi].id + "/lastStatus", "\"missed\"");
+        // FIX: parent node එකට write කරනවා — string correctly save වෙනවා
+        firebasePut(String(DB_PATH) + "/medications/" + slots[mi].id,
+                    "{\"lastStatus\":\"missed\"}");
       }
       pendingCount = 0;
       delay(3000);
@@ -343,8 +342,8 @@ void doDispense() {
                    " x" + String(slots[i].pillCount));
     dispensePills(slots[i].compartment, slots[i].pillCount);
     names[j]    = slots[i].name;
-    medIds[j]   = slots[i].medicationId;  // Firestore doc ID
-    slotKeys[j] = slots[i].id;            // RTDB slot key
+    medIds[j]   = slots[i].medicationId;
+    slotKeys[j] = slots[i].id;
     comps[j]    = slots[i].compartment;
   }
 
@@ -358,8 +357,9 @@ void doDispense() {
   for (int j = 0; j < pendingCount; j++) {
     logHistory(medIds[j], names[j], comps[j], "taken");
     sendDoseNotification(names[j], "taken");
-    // App එකේ real-time update සඳහා lastStatus write කරනවා
-    firebasePut(String(DB_PATH) + "/medications/" + slotKeys[j] + "/lastStatus", "\"taken\"");
+    // FIX: parent node එකට write කරනවා — string correctly save වෙනවා
+    firebasePut(String(DB_PATH) + "/medications/" + slotKeys[j],
+                "{\"lastStatus\":\"taken\"}");
   }
   pendingCount = 0;
   updateDeviceStatus(true);
@@ -746,13 +746,6 @@ void fetchMedications() {
     return;
   }
 
-  struct InFlight { String id; bool triggered; };
-  InFlight saved[10];
-  int savedCount = 0;
-  for (int i = 0; i < slotCount && savedCount < 10; i++) {
-    if (slots[i].triggered) saved[savedCount++] = { slots[i].id, true };
-  }
-
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
@@ -793,9 +786,9 @@ void fetchMedications() {
     if (slots[slotCount].compartment < 0) slots[slotCount].compartment = 0;
     if (slots[slotCount].compartment > 2) slots[slotCount].compartment = 2;
 
-    slots[slotCount].pillCount = med["pillCount"] | 1;
+    slots[slotCount].pillCount      = med["pillCount"] | 1;
+    slots[slotCount].days           = 0x7F;
 
-    slots[slotCount].days = 0x7F;
     if (med.containsKey("days")) {
       JsonObject daysObj = med["days"].as<JsonObject>();
       uint8_t mask = 0;
@@ -808,17 +801,9 @@ void fetchMedications() {
       slots[slotCount].days = (mask == 0) ? 0x7F : mask;
     }
 
-    slots[slotCount].active        = true;
-    slots[slotCount].triggered     = false;
+    slots[slotCount].active         = true;
+    slots[slotCount].triggered      = false;
     slots[slotCount].waitingConfirm = false;
-
-    for (int j = 0; j < savedCount; j++) {
-      if (saved[j].id == slots[slotCount].id) {
-        slots[slotCount].triggered = saved[j].triggered;
-        Serial.println("Restored triggered: " + slots[slotCount].id);
-        break;
-      }
-    }
 
     Serial.println("Loaded: " + slots[slotCount].name +
                    " " + pad(slots[slotCount].hour) + ":" + pad(slots[slotCount].minute) +
@@ -889,7 +874,7 @@ void updateDeviceStatus(bool connected) {
                 ",\"serverTime\":{\".sv\":\"timestamp\"}" +
                 ",\"signalStrength\":" + String(signal) +
                 ",\"model\":\"SmartDose SIM7600\"" +
-                ",\"firmware\":\"1.0.4\"}";
+                ",\"firmware\":\"1.0.6\"}";
 
   int httpStatus = firebasePut(String(DB_PATH) + "/device", json);
   if (httpStatus == 200) {

@@ -9,10 +9,15 @@ import {
 import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
-  deleteMedication, dispenseNow, listenESP32History,
-  listenMedications, listenRTDBMedicationStatuses, Medication,
+  deleteMedication, dispenseNow,
+  listenMedications, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
+
+const RTDB_URL    = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL ?? '';
+const RTDB_SECRET = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_SECRET ?? '';
+const rtdbUrl = (path: string) =>
+  `${RTDB_URL}/${path}.json${RTDB_SECRET ? `?auth=${RTDB_SECRET}` : ''}`;
 
 const greeting = () => {
   const h = new Date().getHours();
@@ -138,6 +143,17 @@ const findMedicationForHistory = (meds: Medication[], item: any) => {
   );
 };
 
+// lastStatus can be a plain string OR a Firebase push-key object: { "-Abc": "taken" }
+const extractLastStatus = (raw: any): string | null => {
+  if (!raw) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const v = Object.values(raw)[0];
+    if (typeof v === 'string') return v;
+  }
+  return null;
+};
+
 const getHistoryTime = (item: any) => {
   const idSeconds = Number(item.id);
   if (Number.isFinite(idSeconds)) return idSeconds * 1000;
@@ -188,15 +204,48 @@ export default function HomeScreen() {
       setMedications(meds);
       scheduleReminders(meds);
     });
-    const u2 = listenESP32History((h) => {
-      const filtered = [...h]
-        .filter(item => item.medication)
-        .sort((a, b) => getHistoryTime(b) - getHistoryTime(a));
 
-      setHistory(filtered.slice(0, 8));
-    });
-    const u3 = listenRTDBMedicationStatuses(setRtdbStatuses);
-    return () => { u1(); u2(); u3(); };
+    let cancelled = false;
+
+    const pollMedications = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(rtdbUrl('smartdose/medications'));
+        const data = await res.json();
+        if (cancelled || !data || typeof data !== 'object') { setRtdbStatuses({}); return; }
+        const statuses: Record<string, string> = {};
+        for (const val of Object.values(data as Record<string, any>)) {
+          const st = extractLastStatus((val as any)?.lastStatus);
+          if (!st) continue;
+          if ((val as any).medicationId) statuses[(val as any).medicationId] = st;
+          if ((val as any).name) statuses['name:' + String((val as any).name).trim().toLowerCase()] = st;
+          if ((val as any).compartment != null) statuses['comp:' + String((val as any).compartment)] = st;
+        }
+        console.log('[SmartDose] RTDB poll statuses:', JSON.stringify(statuses));
+        setRtdbStatuses(statuses);
+      } catch (e) { console.error('[SmartDose] Meds poll error:', e); }
+    };
+
+    const pollHistory = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(rtdbUrl('smartdose/history'));
+        const data = await res.json();
+        if (cancelled || !data || typeof data !== 'object') { setHistory([]); return; }
+        const list = Object.entries(data as Record<string, any>)
+          .map(([id, val]) => ({ id, ...(val as any) }))
+          .filter(item => item.medication)
+          .sort((a, b) => getHistoryTime(b) - getHistoryTime(a));
+        setHistory(list.slice(0, 8));
+      } catch (e) { console.error('[SmartDose] History poll error:', e); }
+    };
+
+    pollMedications();
+    pollHistory();
+    const medsTimer = setInterval(pollMedications, 10_000);
+    const histTimer = setInterval(pollHistory, 15_000);
+
+    return () => { cancelled = true; clearInterval(medsTimer); clearInterval(histTimer); u1(); };
   }, []);
 
   const scheduleReminders = async (meds: Medication[]) => {

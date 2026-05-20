@@ -5,7 +5,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Animated, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Palette, Radius, Shadows, Space, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
-import { listenMedications, logMedicationDose, markMedicationTaken, Medication } from '../../services/medicationService';
+import { listenMedications, markMedicationTaken, markTakenRTDB, Medication } from '../../services/medicationService';
 
 const DAYS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -107,8 +107,8 @@ export default function ScheduleScreen() {
   );
 
   const handleTaken = async (med: Medication) => {
-    await markMedicationTaken(med.id);
-    await logMedicationDose(med.id, 'taken', med.time || '08:00', new Date().toISOString().split('T')[0]);
+    await markMedicationTaken(med.id);  // Firestore taken:true + adherenceLogs entry
+    await markTakenRTDB(med);           // RTDB lastStatus + history entry
   };
 
   const grouped: Record<string, Medication[]> = {};

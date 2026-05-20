@@ -152,6 +152,26 @@ export const markAllNotificationsRead = async (notifications: AppNotification[])
   }
 };
 
+export const markTakenRTDB = async (med: Medication) => {
+  const now     = new Date();
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const unixSec = Math.floor(now.getTime() / 1000);
+  const slotKey = `${med.id}_0`;
+
+  // Update lastStatus on the primary RTDB slot so the Home page polling picks it up
+  await set(ref(rtdb, `smartdose/medications/${slotKey}/lastStatus`), 'taken');
+
+  // Log to RTDB history (same format the firmware uses; compartment is 0-indexed there)
+  await set(ref(rtdb, `smartdose/history/${unixSec}`), {
+    medicationId: med.id,
+    medication:   med.name,
+    compartment:  med.compartment - 1,
+    status:       'taken',
+    time:         timeStr,
+    source:       'manual',
+  });
+};
+
 export const dispenseNow = async (compartment: number) => {
   await set(ref(rtdb, 'smartdose/commands'), {
     dispenseNow: true,
