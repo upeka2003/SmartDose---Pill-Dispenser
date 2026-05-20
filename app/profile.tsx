@@ -9,7 +9,32 @@ import {
 import { Palette, Radius, Shadows } from '../constants/theme';
 import { useAccessibility } from '../contexts/AccessibilityContext';
 import { auth } from '../services/firebase';
-import { getProfile, saveProfile, uploadProfilePhoto } from '../services/profileService';
+import { getProfile, saveProfile } from '../services/profileService';
+
+// Resize a File to maxPx on its longest side and return a base64 JPEG data-URL.
+// Keeps the result small enough to fit in a Firestore document (< 1 MB).
+function resizeImageToBase64(file: File, maxPx = 256, quality = 0.8): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const blobUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(blobUrl);
+      const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * scale));
+      const h = Math.max(1, Math.round(img.height * scale));
+      console.log(`[Profile] Resizing ${img.width}×${img.height} → ${w}×${h}`);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { reject(new Error('Canvas 2D not supported')); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error('Image load failed')); };
+    img.src = blobUrl;
+  });
+}
 
 // ─── Avatar ──────────────────────────────────────────────────────────────────
 
@@ -94,53 +119,26 @@ export default function ProfileScreen() {
 
   // ── Photo picker ────────────────────────────────────────────────────────────
 
-  const pickPhoto = async () => {
+  const pickPhoto = () => {
     if (Platform.OS === 'web') {
       const input = document.createElement('input');
       input.type = 'file';
       input.accept = 'image/*';
       input.onchange = async (e: any) => {
-        const file: File = e.target.files?.[0];
+        const file = e.target.files?.[0];
         if (!file || !userId) return;
-        setUploading(true);
         try {
-          const url = await uploadProfilePhoto(userId, file);
-          setPhotoURL(url);
-          await saveProfile(userId, { photoURL: url });
-        } catch (err: any) {
-          Alert.alert('Upload failed', err.message);
+          // Convert to base64 using canvas (no Firebase Storage, no CORS)
+          const base64 = await resizeImageToBase64(file);
+          console.log('[Profile] base64 length:', base64.length);
+          setPhotoURL(base64);
+          await saveProfile(userId, { photoURL: base64 });
+          console.log('[Profile] photo saved to Firestore');
+        } catch (err) {
+          console.error('[Profile] photo save error:', err);
         }
-        setUploading(false);
       };
       input.click();
-      return;
-    }
-
-    // Native — try expo-image-picker if installed
-    try {
-      const ImagePicker = require('expo-image-picker');
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission needed', 'Please allow photo library access.');
-        return;
-      }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.8,
-      });
-      if (result.canceled) return;
-      setUploading(true);
-      const resp = await fetch(result.assets[0].uri);
-      const blob = await resp.blob();
-      const url  = await uploadProfilePhoto(userId, blob);
-      setPhotoURL(url);
-      await saveProfile(userId, { photoURL: url });
-    } catch {
-      Alert.alert('Not available', 'Run: npx expo install expo-image-picker');
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -151,13 +149,16 @@ export default function ProfileScreen() {
       Alert.alert('Error', 'Name cannot be empty.');
       return;
     }
+    console.log('[Profile] Saving profile — userId:', userId, 'photoURL length:', photoURL.length);
     setSaving(true);
     try {
       await saveProfile(userId, { displayName: displayName.trim(), bio: bio.trim(), photoURL });
+      console.log('[Profile] Profile saved successfully');
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (err: any) {
-      Alert.alert('Save failed', err.message);
+      console.error('[Profile] Save failed:', err);
+      Alert.alert('Save failed', err.message ?? String(err));
     }
     setSaving(false);
   };

@@ -51,7 +51,6 @@ export default function AnalyticsScreen() {
         const url = 'https://smartdose-dcd88-default-rtdb.firebaseio.com/smartdose/history.json?auth=CZnwewbitQSo2RY8CvP6nf0lHbX4fAgwS7dZAKMi';
         const res  = await fetch(url);
         const data = await res.json();
-        console.log('[Analytics] raw history keys:', data ? Object.keys(data).length : 'null');
         if (!cancelled) setRtdbHistory(data || {});
       } catch (e) { console.error('[Analytics] history poll error:', e); }
     };
@@ -81,7 +80,6 @@ export default function AnalyticsScreen() {
   const historyByDate = useMemo(() => {
     const map: Record<string, DayData> = {};
     for (const [id, val] of Object.entries(rtdbHistory)) {
-      console.log('[Analytics] entry:', id, JSON.stringify(val));
       const key = Number(id);
       if (!Number.isFinite(key) || key < 1_000_000_000) continue;
       const dateStr = rtdbKeyToLKTDate(key);
@@ -94,7 +92,6 @@ export default function AnalyticsScreen() {
       if (status === 'taken' || status === 'dispensed' || status === 'auto-dispensed') map[dateStr].taken++;
       else if (status === 'missed') map[dateStr].missed++;
     }
-    console.log('[Analytics] historyByDate:', JSON.stringify(map));
     return map;
   }, [rtdbHistory]);
 
@@ -225,13 +222,19 @@ export default function AnalyticsScreen() {
       const key = Number(id);
       if (!Number.isFinite(key) || key < 1_000_000_000) continue;
       if (!periodDateSet.has(rtdbKeyToLKTDate(key))) continue;
+      // Unwrap push-key wrapper
       const entry = (val && typeof val === 'object' && !val.status)
         ? Object.values(val)[0] as any
         : val;
-      if (entry?.medicationId !== med.id) continue;
+      // Match by Firestore ID → medication name → compartment (0-indexed)
+      const matches =
+        entry?.medicationId === med.id ||
+        String(entry?.medication ?? '').trim().toLowerCase() === med.name.trim().toLowerCase() ||
+        Number(entry?.compartment) === med.compartment - 1;
+      if (!matches) continue;
       total++;
-      const st = typeof entry?.status === 'string' ? entry.status.trim().toLowerCase() : '';
-      if (st === 'taken' || st === 'dispensed' || st === 'auto-dispensed') taken++;
+      const st = String(entry?.status ?? '').trim().toLowerCase();
+      if (['taken', 'dispensed', 'auto-dispensed'].includes(st)) taken++;
     }
     return { taken, total, pct: total > 0 ? Math.round(taken / total * 100) : 0 };
   };

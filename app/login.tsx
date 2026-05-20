@@ -72,18 +72,9 @@ export default function LoginScreen() {
       }
       router.replace('/(tabs)');
     } catch (error: any) {
-      const code = error?.code ?? '';
-      const msg =
-        code === 'auth/invalid-credential'   ? 'Wrong email or password. Please try again.' :
-        code === 'auth/user-not-found'        ? 'No account found with this email.' :
-        code === 'auth/wrong-password'        ? 'Incorrect password. Please try again.' :
-        code === 'auth/email-already-in-use'  ? 'An account with this email already exists.' :
-        code === 'auth/weak-password'         ? 'Password is too weak. Use at least 6 characters.' :
-        code === 'auth/invalid-email'         ? 'Please enter a valid email address.' :
-        code === 'auth/too-many-requests'     ? 'Too many failed attempts. Try again later.' :
-        code === 'auth/network-request-failed'? 'Network error. Check your internet connection.' :
-        error.message;
-      Alert.alert('Sign In Failed', msg);
+      console.error('[Login] Auth error code:', error.code);
+      console.error('[Login] Auth error message:', error.message);
+      Alert.alert('Error', `${error.code}: ${error.message}`);
     }
     setLoading(false);
   };
