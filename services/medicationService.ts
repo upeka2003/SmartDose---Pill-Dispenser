@@ -254,8 +254,21 @@ export const listenRTDBMedicationStatuses = (
     const data = snapshot.val() as Record<string, any>;
     const statuses: Record<string, string> = {};
     for (const val of Object.values(data)) {
-      if (val?.medicationId && val?.lastStatus && !statuses[val.medicationId]) {
-        statuses[val.medicationId] = val.lastStatus;
+      if (!val?.lastStatus) continue;
+      const status = String(val.lastStatus);
+      // Primary: match by Firestore doc ID
+      if (val.medicationId && !statuses[val.medicationId]) {
+        statuses[val.medicationId] = status;
+      }
+      // Fallback: match by medication name (lowercased)
+      if (val.name) {
+        const nameKey = 'name:' + String(val.name).toLowerCase();
+        if (!statuses[nameKey]) statuses[nameKey] = status;
+      }
+      // Fallback: match by compartment number (1-indexed as stored by app)
+      if (val.compartment != null) {
+        const compKey = 'comp:' + String(val.compartment);
+        if (!statuses[compKey]) statuses[compKey] = status;
       }
     }
     callback(statuses);

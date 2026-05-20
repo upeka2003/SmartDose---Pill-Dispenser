@@ -118,7 +118,9 @@ const isRecentHistoryItem = (item: any) => {
   const seconds = Number(item.id);
   if (!Number.isFinite(seconds)) return true;
   const ageMs = Date.now() - seconds * 1000;
-  return ageMs >= 0 && ageMs < 24 * 60 * 60 * 1000;
+  // Allow up to 12h "future" timestamps: RTC stores local time (e.g. UTC+5:30)
+  // as if it were UTC, so unixtime() is ~19800s ahead of real UTC.
+  return ageMs > -(12 * 60 * 60 * 1000) && ageMs < 48 * 60 * 60 * 1000;
 };
 
 const findMedicationForHistory = (meds: Medication[], item: any) => {
@@ -246,7 +248,11 @@ export default function HomeScreen() {
   const getDoseStatus = (med: Medication): DoseStatus => {
     const fromHistory = doseStatusByMedicationId[med.id];
     if (fromHistory) return fromHistory;
-    const fromRtdb = normalizeDoseStatus(rtdbStatuses[med.id]);
+    // Check RTDB lastStatus by Firestore ID, then by name, then by compartment
+    const fromRtdb =
+      normalizeDoseStatus(rtdbStatuses[med.id]) ??
+      normalizeDoseStatus(rtdbStatuses['name:' + med.name.trim().toLowerCase()]) ??
+      normalizeDoseStatus(rtdbStatuses['comp:' + med.compartment]);
     if (fromRtdb) return fromRtdb;
     return med.taken ? 'taken' : 'pending';
   };
