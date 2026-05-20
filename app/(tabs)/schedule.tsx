@@ -1,11 +1,43 @@
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Bell, CheckCircle2, Clock, Moon, MoveRight, Sun, Sunset } from 'lucide-react-native';
+import { Bell, CheckCircle2, Circle, Clock, Moon, MoveRight, Sun, Sunset, XCircle } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Animated, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Palette, Radius, Shadows, Space, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
-import { listenMedications, markMedicationTaken, markTakenRTDB, Medication } from '../../services/medicationService';
+import { listenMedications, Medication } from '../../services/medicationService';
+
+const RTDB_URL    = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL ?? '';
+const RTDB_SECRET = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_SECRET ?? '';
+const rtdbUrl = (path: string) =>
+  `${RTDB_URL}/${path}.json${RTDB_SECRET ? `?auth=${RTDB_SECRET}` : ''}`;
+
+type DoseStatus = 'pending' | 'taken' | 'missed';
+
+const findLastStatusInSlot = (slot: any): string | null => {
+  if (!slot || typeof slot !== 'object') return null;
+  if (slot.lastStatus !== undefined) {
+    if (typeof slot.lastStatus === 'string') return slot.lastStatus;
+    if (typeof slot.lastStatus === 'object') {
+      const v = Object.values(slot.lastStatus)[0];
+      if (typeof v === 'string') return v;
+    }
+  }
+  for (const [k, v] of Object.entries(slot)) {
+    if (k.startsWith('-') && v && typeof v === 'object') {
+      const nested = (v as any).lastStatus;
+      if (typeof nested === 'string') return nested;
+    }
+  }
+  return null;
+};
+
+const normalizeDoseStatus = (status?: string): DoseStatus | null => {
+  const s = String(status ?? '').toLowerCase();
+  if (['taken', 'dispensed', 'auto-dispensed'].includes(s)) return 'taken';
+  if (s === 'missed') return 'missed';
+  return null;
+};
 
 const DAYS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -31,24 +63,18 @@ function getSection(time: string) {
   return SECTIONS.find(s => h >= s.range[0] && h <= s.range[1])?.key ?? 'Morning';
 }
 
-function MedRow({ med, onTaken }: { med: Medication; onTaken: () => void }) {
-  const opacity = useState(new Animated.Value(1))[0];
+function MedRow({ med, status }: { med: Medication; status: DoseStatus }) {
   const { cbColors, palette } = useAccessibility();
   const r = useMemo(() => makeRowStyles(palette), [palette]);
 
-  const handlePress = () => {
-    Animated.timing(opacity, { toValue: 0.45, duration: 250, useNativeDriver: true }).start();
-    onTaken();
-  };
-
   return (
-    <Animated.View style={[r.card, { opacity: med.taken ? 0.45 : 1 }]}>
+    <View style={[r.card, { opacity: status === 'taken' ? 0.6 : 1 }]}>
       <View style={[r.strip, { backgroundColor: med.color }]} />
       <View style={[r.iconWrap, { backgroundColor: med.color + '18' }]}>
         <View style={[r.dot, { backgroundColor: med.color }]} />
       </View>
       <View style={r.body}>
-        <Text style={[r.name, med.taken && r.nameTaken]} numberOfLines={1}>{med.name}</Text>
+        <Text style={[r.name, status === 'taken' && r.nameTaken]} numberOfLines={1}>{med.name}</Text>
         <Text style={r.dosage}>{med.dosage}</Text>
         <View style={r.meta}>
           <Clock size={11} color={palette.textSoft} />
@@ -57,25 +83,32 @@ function MedRow({ med, onTaken }: { med: Medication; onTaken: () => void }) {
           <Text style={r.metaTxt}>C{med.compartment}</Text>
         </View>
       </View>
-      {med.taken ? (
-        <View style={[r.takenBadge, { backgroundColor: cbColors.successSoft }]}>
+      {status === 'taken' ? (
+        <View style={[r.statusBadge, { backgroundColor: cbColors.successSoft }]}>
           <CheckCircle2 size={14} color={cbColors.success} />
-          <Text style={[r.takenTxt, { color: cbColors.success }]}>Done</Text>
+          <Text style={[r.statusTxt, { color: cbColors.success }]}>Taken</Text>
+        </View>
+      ) : status === 'missed' ? (
+        <View style={[r.statusBadge, { backgroundColor: cbColors.dangerSoft }]}>
+          <XCircle size={14} color={cbColors.danger} />
+          <Text style={[r.statusTxt, { color: cbColors.danger }]}>Missed</Text>
         </View>
       ) : (
-        <TouchableOpacity style={r.btn} onPress={handlePress} activeOpacity={0.75}>
-          <Text style={r.btnTxt}>Mark{'\n'}Taken</Text>
-        </TouchableOpacity>
+        <View style={[r.statusBadge, { backgroundColor: palette.background }]}>
+          <Circle size={14} color={palette.textSoft} />
+          <Text style={[r.statusTxt, { color: palette.textMuted }]}>Pending</Text>
+        </View>
       )}
-    </Animated.View>
+    </View>
   );
 }
 
 export default function ScheduleScreen() {
-  const [medications, setMedications] = useState<Medication[]>([]);
-  const [view,       setView]         = useState<'Today' | 'Tomorrow' | 'Week'>('Today');
-  const [weekDays,   setWeekDays]     = useState<Date[]>([]);
-  const [selDate,    setSelDate]      = useState(new Date());
+  const [medications,   setMedications]   = useState<Medication[]>([]);
+  const [rtdbStatuses,  setRtdbStatuses]  = useState<Record<string, string>>({});
+  const [view,          setView]          = useState<'Today' | 'Tomorrow' | 'Week'>('Today');
+  const [weekDays,      setWeekDays]      = useState<Date[]>([]);
+  const [selDate,       setSelDate]       = useState(new Date());
   const router = useRouter();
   const { hasUnread } = useNotifications();
   const { speak, voiceEnabled, cbColors, palette, darkMode } = useAccessibility();
@@ -88,8 +121,37 @@ export default function ScheduleScreen() {
       const d = new Date(); d.setDate(d.getDate() + i); days.push(d);
     }
     setWeekDays(days);
-    return () => unsub();
+
+    let cancelled = false;
+    const pollMedications = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(rtdbUrl('smartdose/medications'));
+        const data = await res.json();
+        if (cancelled || !data || typeof data !== 'object') { setRtdbStatuses({}); return; }
+        const statuses: Record<string, string> = {};
+        for (const [slotKey, val] of Object.entries(data as Record<string, any>)) {
+          const st = findLastStatusInSlot(val);
+          if (!st) continue;
+          const baseId = slotKey.replace(/_\d+$/, '');
+          if (!statuses[baseId]) statuses[baseId] = st;
+          if ((val as any).name) statuses['name:' + String((val as any).name).trim().toLowerCase()] = st;
+          if ((val as any).compartment != null) statuses['comp:' + String((val as any).compartment)] = st;
+        }
+        setRtdbStatuses(statuses);
+      } catch (e) { console.error('[SmartDose] Schedule poll error:', e); }
+    };
+
+    pollMedications();
+    const timer = setInterval(pollMedications, 10_000);
+    return () => { cancelled = true; clearInterval(timer); unsub(); };
   }, []);
+
+  const getDoseStatus = (med: Medication): DoseStatus =>
+    normalizeDoseStatus(rtdbStatuses[med.id]) ??
+    normalizeDoseStatus(rtdbStatuses['name:' + med.name.trim().toLowerCase()]) ??
+    normalizeDoseStatus(rtdbStatuses['comp:' + med.compartment]) ??
+    (med.taken ? 'taken' : 'pending');
 
   useFocusEffect(
     React.useCallback(() => {
@@ -106,17 +168,12 @@ export default function ScheduleScreen() {
     }, [voiceEnabled])
   );
 
-  const handleTaken = async (med: Medication) => {
-    await markMedicationTaken(med.id);  // Firestore taken:true + adherenceLogs entry
-    await markTakenRTDB(med);           // RTDB lastStatus + history entry
-  };
-
   const grouped: Record<string, Medication[]> = {};
   SECTIONS.forEach(sec => (grouped[sec.key] = []));
   medications.forEach(m => grouped[getSection(m.time || '08:00')].push(m));
 
   const total  = medications.length;
-  const taken  = medications.filter(m => m.taken).length;
+  const taken  = medications.filter(m => getDoseStatus(m) === 'taken').length;
   const pct    = total > 0 ? Math.round((taken / total) * 100) : 0;
 
   const isToday = (d: Date) => d.toDateString() === new Date().toDateString();
@@ -219,13 +276,13 @@ export default function ScheduleScreen() {
               <View style={s.sectionHeader}>
                 <SectionIcon label={label} />
                 <Text style={s.sectionTitle}>{label}</Text>
-                <Text style={s.sectionCount}>{grouped[key].filter(m => m.taken).length}/{grouped[key].length}</Text>
+                <Text style={s.sectionCount}>{grouped[key].filter(m => getDoseStatus(m) === 'taken').length}/{grouped[key].length}</Text>
               </View>
               {grouped[key].map(med => (
                 <MedRow
                   key={med.id}
                   med={med}
-                  onTaken={() => handleTaken(med)}
+                  status={getDoseStatus(med)}
                 />
               ))}
             </View>
@@ -339,13 +396,6 @@ const makeRowStyles = (P: typeof Palette) => StyleSheet.create({
   meta:     { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
   metaTxt:  { ...Type.caption, color: P.textSoft },
   sep:      { width: 3, height: 3, borderRadius: 2, backgroundColor: P.textSoft },
-  btn: {
-    backgroundColor: P.primary,
-    paddingHorizontal: Space.md, paddingVertical: Space.sm,
-    borderRadius: Radius.sm, marginRight: Space.md,
-    alignItems: 'center', ...Shadows.button,
-  },
-  btnTxt:    { color: '#fff', fontWeight: '700', fontSize: 12, textAlign: 'center' },
-  takenBadge:{ flexDirection: 'row', alignItems: 'center', gap: 4, marginRight: Space.md, paddingHorizontal: 10, paddingVertical: 6, borderRadius: Radius.sm },
-  takenTxt:  { ...Type.caption, color: P.green },
+  statusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, marginRight: Space.md, paddingHorizontal: 10, paddingVertical: 6, borderRadius: Radius.sm },
+  statusTxt:   { ...Type.caption },
 });

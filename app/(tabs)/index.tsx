@@ -143,14 +143,30 @@ const findMedicationForHistory = (meds: Medication[], item: any) => {
   );
 };
 
-// lastStatus can be a plain string OR a Firebase push-key object: { "-Abc": "taken" }
-const extractLastStatus = (raw: any): string | null => {
-  if (!raw) return null;
-  if (typeof raw === 'string') return raw;
-  if (typeof raw === 'object') {
-    const v = Object.values(raw)[0];
-    if (typeof v === 'string') return v;
+// Finds lastStatus inside a slot node, handling three Firebase layouts:
+//   1. Direct string:          slot.lastStatus = "taken"
+//   2. Push-key on lastStatus: slot.lastStatus = { "-Abc": "taken" }
+//   3. Push-key child on slot: slot["-Abc"] = { lastStatus: "taken" }
+const findLastStatusInSlot = (slot: any): string | null => {
+  if (!slot || typeof slot !== 'object') return null;
+
+  // Case 1 & 2
+  if (slot.lastStatus !== undefined) {
+    if (typeof slot.lastStatus === 'string') return slot.lastStatus;
+    if (typeof slot.lastStatus === 'object') {
+      const v = Object.values(slot.lastStatus)[0];
+      if (typeof v === 'string') return v;
+    }
   }
+
+  // Case 3: lastStatus lives inside a Firebase push-key child (key starts with '-')
+  for (const [k, v] of Object.entries(slot)) {
+    if (k.startsWith('-') && v && typeof v === 'object') {
+      const nested = (v as any).lastStatus;
+      if (typeof nested === 'string') return nested;
+    }
+  }
+
   return null;
 };
 
@@ -214,10 +230,14 @@ export default function HomeScreen() {
         const data = await res.json();
         if (cancelled || !data || typeof data !== 'object') { setRtdbStatuses({}); return; }
         const statuses: Record<string, string> = {};
-        for (const val of Object.values(data as Record<string, any>)) {
-          const st = extractLastStatus((val as any)?.lastStatus);
+        for (const [slotKey, val] of Object.entries(data as Record<string, any>)) {
+          const st = findLastStatusInSlot(val);
+          console.log('[SmartDose] RTDB slot:', slotKey, '→ lastStatus:', st);
           if (!st) continue;
-          if ((val as any).medicationId) statuses[(val as any).medicationId] = st;
+          // Strip _N suffix so the key matches the Firestore medication ID
+          const baseId = slotKey.replace(/_\d+$/, '');
+          if (!statuses[baseId]) statuses[baseId] = st;
+          // Name and compartment fallbacks
           if ((val as any).name) statuses['name:' + String((val as any).name).trim().toLowerCase()] = st;
           if ((val as any).compartment != null) statuses['comp:' + String((val as any).compartment)] = st;
         }

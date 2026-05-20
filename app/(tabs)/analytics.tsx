@@ -5,11 +5,27 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Modal, ScrollView, Share, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Palette, Radius, Shadows } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
-import { AdherenceLog, listenAdherenceLogs, listenMedications, Medication } from '../../services/medicationService';
+import { listenMedications, Medication } from '../../services/medicationService';
+
+const RTDB_URL    = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL ?? '';
+const RTDB_SECRET = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_SECRET ?? '';
+const rtdbUrl = (path: string) =>
+  `${RTDB_URL}/${path}.json${RTDB_SECRET ? `?auth=${RTDB_SECRET}` : ''}`;
+
+// Local date string for Date objects (browser timezone)
+const toDateStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Convert firmware unix key → Sri Lanka date string.
+// Firmware RTC stores LKT time (UTC+5:30) as if it were UTC, so timestamps
+// are +19800 s ahead of real UTC. Adding 19800 gives the real LKT instant;
+// toISOString() then yields the correct Sri Lanka calendar date.
+const rtdbKeyToLKTDate = (key: number): string =>
+  new Date((key + 19800) * 1000).toISOString().slice(0, 10);
 
 export default function AnalyticsScreen() {
   const [medications, setMedications] = useState<Medication[]>([]);
-  const [logs, setLogs] = useState<AdherenceLog[]>([]);
+  const [rtdbHistory, setRtdbHistory] = useState<Record<string, any>>({});
   const [selectedPeriod, setSelectedPeriod] = useState('Week');
   const [selectedMonth, setSelectedMonth] = useState(new Date());
   const [showCalendar, setShowCalendar] = useState(false);
@@ -27,8 +43,22 @@ export default function AnalyticsScreen() {
 
   useEffect(() => {
     const unsubMeds = listenMedications(setMedications);
-    const unsubLogs = listenAdherenceLogs(setLogs);
-    return () => { unsubMeds(); unsubLogs(); };
+
+    let cancelled = false;
+    const pollHistory = async () => {
+      if (cancelled) return;
+      try {
+        const url = 'https://smartdose-dcd88-default-rtdb.firebaseio.com/smartdose/history.json?auth=CZnwewbitQSo2RY8CvP6nf0lHbX4fAgwS7dZAKMi';
+        const res  = await fetch(url);
+        const data = await res.json();
+        console.log('[Analytics] raw history keys:', data ? Object.keys(data).length : 'null');
+        if (!cancelled) setRtdbHistory(data || {});
+      } catch (e) { console.error('[Analytics] history poll error:', e); }
+    };
+
+    pollHistory();
+    const histTimer = setInterval(pollHistory, 15_000);
+    return () => { cancelled = true; clearInterval(histTimer); unsubMeds(); };
   }, []);
 
   useFocusEffect(
@@ -46,122 +76,117 @@ export default function AnalyticsScreen() {
     }, [voiceEnabled])
   );
 
-  const totalRequiredDoses = medications.reduce((acc, med) => acc + (med.times?.length || 1), 0);
-
-  const calculateStreak = () => {
-    if (logs.length === 0 || totalRequiredDoses === 0) return 0;
-    let streak = 0;
-    const check = new Date();
-    check.setHours(0, 0, 0, 0);
-    for (let i = 0; i < 365; i++) {
-      const d = new Date(check);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      const dayLogs = logs.filter(l => l.date === dateStr && l.status === 'taken');
-      if (dayLogs.length >= totalRequiredDoses) {
-        streak++;
-      } else if (i > 0) {
-        break;
-      }
+  // ── Core data: group all RTDB history by Sri Lanka date ─────────────────
+  type DayData = { taken: number; missed: number };
+  const historyByDate = useMemo(() => {
+    const map: Record<string, DayData> = {};
+    for (const [id, val] of Object.entries(rtdbHistory)) {
+      console.log('[Analytics] entry:', id, JSON.stringify(val));
+      const key = Number(id);
+      if (!Number.isFinite(key) || key < 1_000_000_000) continue;
+      const dateStr = rtdbKeyToLKTDate(key);
+      if (!map[dateStr]) map[dateStr] = { taken: 0, missed: 0 };
+      // History entries are push-key wrapped: val = { "-PushKey": { status, medication, ... } }
+      const entry = (val && typeof val === 'object' && !val.status)
+        ? Object.values(val)[0] as any
+        : val;
+      const status = typeof entry?.status === 'string' ? entry.status.trim().toLowerCase() : '';
+      if (status === 'taken' || status === 'dispensed' || status === 'auto-dispensed') map[dateStr].taken++;
+      else if (status === 'missed') map[dateStr].missed++;
     }
-    return streak;
-  };
+    console.log('[Analytics] historyByDate:', JSON.stringify(map));
+    return map;
+  }, [rtdbHistory]);
 
-  const calculateBestStreak = () => {
-    if (logs.length === 0 || totalRequiredDoses === 0) return 0;
-    const dateMap: { [key: string]: number } = {};
-    logs.filter(l => l.status === 'taken').forEach(l => {
-      dateMap[l.date] = (dateMap[l.date] || 0) + 1;
-    });
-    const sortedDates = Object.keys(dateMap).sort();
-    let best = 0, current = 0;
-    for (let i = 0; i < sortedDates.length; i++) {
-      if (dateMap[sortedDates[i]] >= totalRequiredDoses) {
-        current++;
-        best = Math.max(best, current);
-      } else {
-        current = 0;
+  // ── Period filter: set of date strings in the selected period ─────────────
+  const periodDates = useMemo(() => {
+    const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    return Object.keys(historyByDate).filter(dateStr => {
+      const d = new Date(dateStr);
+      if (selectedPeriod === 'Week') {
+        const cut = new Date(); cut.setDate(cut.getDate() - 7); cut.setHours(0, 0, 0, 0);
+        return d >= cut && d <= todayEnd;
+      } else if (selectedPeriod === 'Month') {
+        const cut = new Date(); cut.setMonth(cut.getMonth() - 1); cut.setHours(0, 0, 0, 0);
+        return d >= cut && d <= todayEnd;
       }
-    }
-    return best;
-  };
-
-  const streak = calculateStreak();
-  const bestStreak = calculateBestStreak();
-
-  let filteredLogs = logs;
-  if (selectedPeriod === 'Week') {
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    filteredLogs = logs.filter(l => new Date(l.date) >= weekAgo);
-  } else if (selectedPeriod === 'Month') {
-    const monthAgo = new Date();
-    monthAgo.setMonth(monthAgo.getMonth() - 1);
-    filteredLogs = logs.filter(l => new Date(l.date) >= monthAgo);
-  } else if (selectedPeriod === 'Custom') {
-    filteredLogs = logs.filter(l => {
-      const d = new Date(l.date);
       return d >= customStart && d <= customEnd;
     });
-  }
+  }, [historyByDate, selectedPeriod, customStart, customEnd]);
 
-  const takenCount = filteredLogs.filter(l => l.status === 'taken').length;
-  const missedCount = filteredLogs.filter(l => l.status === 'missed').length;
-  const daysInPeriod = selectedPeriod === 'Week' ? 7 : selectedPeriod === 'Month' ? 30 : Math.max(1, Math.ceil((customEnd.getTime() - customStart.getTime()) / (1000 * 60 * 60 * 24)));
-  const totalCount = daysInPeriod * totalRequiredDoses;
-  const adherence = totalCount > 0 ? Math.min(100, Math.round((takenCount / totalCount) * 100)) : 0;
+  const periodDateSet = useMemo(() => new Set(periodDates), [periodDates]);
 
-  const chartData = (() => {
+  const takenCount  = periodDates.reduce((s, d) => s + historyByDate[d].taken,  0);
+  const missedCount = periodDates.reduce((s, d) => s + historyByDate[d].missed, 0);
+  const totalCount  = takenCount + missedCount;
+  const adherence   = totalCount > 0 ? Math.round(takenCount / totalCount * 100) : 0;
+
+  // ── Streak (consecutive days where missed === 0 and taken > 0) ────────────
+  const streak = useMemo(() => {
+    const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
+    let s = 0;
+    for (let i = 0; i < 365; i++) {
+      const d = new Date(todayMid); d.setDate(d.getDate() - i);
+      const day = historyByDate[toDateStr(d)];
+      if (!day || day.taken + day.missed === 0) { if (i === 0) continue; break; }
+      if (day.missed === 0) s++; else break;
+    }
+    return s;
+  }, [historyByDate]);
+
+  const bestStreak = useMemo(() => {
+    let best = 0, cur = 0;
+    for (const dateStr of Object.keys(historyByDate).sort()) {
+      const d = historyByDate[dateStr];
+      if (d.missed === 0 && d.taken > 0) { cur++; best = Math.max(best, cur); } else { cur = 0; }
+    }
+    return best;
+  }, [historyByDate]);
+
+  // Unified chart item shape: takenRatio and missedRatio are 0–1 fractions.
+  type ChartItem = { label: string; takenRatio: number; missedRatio: number; isFuture: boolean; hasData: boolean };
+
+  const logsToRatio = (taken: number, missed: number): Pick<ChartItem, 'takenRatio' | 'missedRatio' | 'hasData'> => {
+    const total = taken + missed;
+    return total > 0
+      ? { takenRatio: taken / total, missedRatio: missed / total, hasData: true }
+      : { takenRatio: 0, missedRatio: 0, hasData: false };
+  };
+
+  const chartData: ChartItem[] = (() => {
     if (selectedPeriod === 'Week') {
-      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      const cd = [];
-      const d = new Date();
-      d.setDate(d.getDate() - 6);
-      for (let i = 0; i < 7; i++) {
-        const cur = new Date(d);
-        cur.setDate(cur.getDate() + i);
-        const curStr = cur.toISOString().split('T')[0];
-        const dayLogs = filteredLogs.filter(l => l.date === curStr);
-        cd.push({
-          label: days[cur.getDay()],
-          taken: dayLogs.filter(l => l.status === 'taken').length,
-          missed: dayLogs.filter(l => l.status === 'missed').length,
-        });
-      }
-      return cd;
+      const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+      return Array.from({ length: 7 }, (_, i) => {
+        const cur = new Date(todayMidnight);
+        cur.setDate(cur.getDate() - 6 + i);
+        if (cur > todayMidnight) return { label: DAY_NAMES[cur.getDay()], takenRatio: 0, missedRatio: 0, isFuture: true, hasData: false };
+        const day = historyByDate[toDateStr(cur)];
+        return { label: DAY_NAMES[cur.getDay()], ...logsToRatio(day?.taken ?? 0, day?.missed ?? 0), isFuture: false };
+      });
     } else if (selectedPeriod === 'Month') {
       return [1, 2, 3, 4].map(w => {
-        const wStart = new Date();
-        wStart.setDate(wStart.getDate() - (4 - w) * 7 - 7);
-        const wEnd = new Date(wStart);
-        wEnd.setDate(wEnd.getDate() + 7);
-        const wLogs = filteredLogs.filter(l => {
-          const d = new Date(l.date);
-          return d >= wStart && d < wEnd;
-        });
-        return {
-          label: `Wk ${w}`,
-          taken: wLogs.filter(l => l.status === 'taken').length,
-          missed: wLogs.filter(l => l.status === 'missed').length,
-        };
+        const wStart = new Date(); wStart.setDate(wStart.getDate() - (4 - w) * 7 - 7); wStart.setHours(0,0,0,0);
+        const wEnd   = new Date(wStart); wEnd.setDate(wEnd.getDate() + 7);
+        let taken = 0, missed = 0;
+        for (const [ds, d] of Object.entries(historyByDate)) {
+          const day = new Date(ds);
+          if (day >= wStart && day < wEnd) { taken += d.taken; missed += d.missed; }
+        }
+        return { label: `Wk ${w}`, ...logsToRatio(taken, missed), isFuture: false };
       });
     } else {
       const totalDays = Math.max(1, Math.ceil((customEnd.getTime() - customStart.getTime()) / (1000 * 60 * 60 * 24)));
-      const partSize = Math.ceil(totalDays / 5);
+      const partSize  = Math.ceil(totalDays / 5);
       return [1, 2, 3, 4, 5].map(p => {
-        const pStart = new Date(customStart);
-        pStart.setDate(pStart.getDate() + (p - 1) * partSize);
-        const pEnd = new Date(pStart);
-        pEnd.setDate(pEnd.getDate() + partSize);
-        const pLogs = filteredLogs.filter(l => {
-          const d = new Date(l.date);
-          return d >= pStart && d < pEnd;
-        });
-        return {
-          label: `P${p}`,
-          taken: pLogs.filter(l => l.status === 'taken').length,
-          missed: pLogs.filter(l => l.status === 'missed').length,
-        };
+        const pStart = new Date(customStart); pStart.setDate(pStart.getDate() + (p - 1) * partSize);
+        const pEnd   = new Date(pStart); pEnd.setDate(pEnd.getDate() + partSize);
+        let taken = 0, missed = 0;
+        for (const [ds, d] of Object.entries(historyByDate)) {
+          const day = new Date(ds);
+          if (day >= pStart && day < pEnd) { taken += d.taken; missed += d.missed; }
+        }
+        return { label: `P${p}`, ...logsToRatio(taken, missed), isFuture: false };
       });
     }
   })();
@@ -183,28 +208,32 @@ export default function AnalyticsScreen() {
   const monthName = new Date(year, month).toLocaleString('default', { month: 'long', year: 'numeric' });
 
   const getDayStatus = (day: number) => {
-    const checkDate = new Date(year, month, day);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
-    if (checkDate > todayEnd) return 'future';
-    const yyyy = checkDate.getFullYear();
-    const mm = String(checkDate.getMonth() + 1).padStart(2, '0');
-    const dd = String(checkDate.getDate()).padStart(2, '0');
-    const dateStr = `${yyyy}-${mm}-${dd}`;
-    const dayLogs = logs.filter(l => l.date === dateStr);
-    const dayTaken = dayLogs.filter(l => l.status === 'taken').length;
-    if (totalRequiredDoses === 0) return 'none';
-    if (dayTaken >= totalRequiredDoses) return 'taken';
-    if (dayTaken > 0) return 'partial';
-    const isStrictlyPast = checkDate.getTime() < new Date().setHours(0, 0, 0, 0);
-    return isStrictlyPast ? 'missed' : 'pending';
+    const checkDate  = new Date(year, month, day);
+    const todayMid   = new Date(); todayMid.setHours(0, 0, 0, 0);
+    if (checkDate > todayMid) return 'future';
+    const dateStr = toDateStr(checkDate);
+    const d = historyByDate[dateStr];
+    if (!d || d.taken + d.missed === 0) return checkDate.getTime() === todayMid.getTime() ? 'pending' : 'none';
+    if (d.missed === 0) return 'taken';
+    if (d.taken  === 0) return 'missed';
+    return 'partial';
   };
 
   const getMedAdherence = (med: Medication) => {
-    const medLogs = filteredLogs.filter(l => l.medicationId === med.id);
-    const taken = medLogs.filter(l => l.status === 'taken').length;
-    const total = daysInPeriod * (med.times?.length || 1);
-    return { taken, total, pct: total > 0 ? Math.min(100, Math.round((taken / total) * 100)) : 0 };
+    let taken = 0, total = 0;
+    for (const [id, val] of Object.entries(rtdbHistory)) {
+      const key = Number(id);
+      if (!Number.isFinite(key) || key < 1_000_000_000) continue;
+      if (!periodDateSet.has(rtdbKeyToLKTDate(key))) continue;
+      const entry = (val && typeof val === 'object' && !val.status)
+        ? Object.values(val)[0] as any
+        : val;
+      if (entry?.medicationId !== med.id) continue;
+      total++;
+      const st = typeof entry?.status === 'string' ? entry.status.trim().toLowerCase() : '';
+      if (st === 'taken' || st === 'dispensed' || st === 'auto-dispensed') taken++;
+    }
+    return { taken, total, pct: total > 0 ? Math.round(taken / total * 100) : 0 };
   };
 
   const handleShare = async () => {
@@ -384,14 +413,14 @@ Generated by SmartDose App.
         <Text style={styles.cardTitle}>{selectedPeriod} Overview</Text>
         <View style={styles.barChart}>
           {chartData.map((d, i) => {
-            const maxBar = Math.max(...chartData.map(c => c.taken + c.missed), 1);
-            const takenH = (d.taken / maxBar) * 80;
-            const missedH = (d.missed / maxBar) * 80;
+            const BAR_H  = 80;
+            const takenH = d.hasData ? Math.round(d.takenRatio  * BAR_H) : 0;
+            const missedH = d.hasData ? Math.round(d.missedRatio * BAR_H) : 0;
             return (
               <View key={i} style={styles.barGroup}>
-                <View style={styles.bars}>
-                  <View style={[styles.bar, { height: Math.max(takenH, 2), backgroundColor: '#10b981' }]} />
-                  {d.missed > 0 && <View style={[styles.bar, { height: Math.max(missedH, 2), backgroundColor: '#ef4444' }]} />}
+                <View style={[styles.stackBar, { height: BAR_H }]}>
+                  {takenH  > 0 && <View style={{ position: 'absolute', bottom: 0,       left: 0, right: 0, height: takenH,  backgroundColor: '#10b981', borderRadius: 4 }} />}
+                  {missedH > 0 && <View style={{ position: 'absolute', bottom: takenH,  left: 0, right: 0, height: missedH, backgroundColor: '#ef4444' }} />}
                 </View>
                 <Text style={styles.barLabel}>{d.label}</Text>
               </View>
@@ -401,12 +430,13 @@ Generated by SmartDose App.
         <View style={styles.legendRow}>
           <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#10b981' }]} /><Text style={styles.legendText}>Taken</Text></View>
           <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#ef4444' }]} /><Text style={styles.legendText}>Missed</Text></View>
+          <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#e5e7eb' }]} /><Text style={styles.legendText}>No data</Text></View>
         </View>
       </View>}
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Medication-Specific Adherence</Text>
-        {medications.length === 0 || filteredLogs.length === 0 ? (
+        {medications.length === 0 || totalCount === 0 ? (
           <View style={styles.emptyAdherence}>
             <Text style={styles.emptyAdherenceIcon}>📊</Text>
             <Text style={styles.emptyAdherenceTitle}>No data yet</Text>
@@ -561,11 +591,10 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
   legendText: { fontSize: 12, color: P.textMuted },
-  barChart: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', height: 100, marginBottom: 8 },
-  barGroup: { alignItems: 'center', gap: 4 },
-  bars: { flexDirection: 'row', alignItems: 'flex-end', gap: 2 },
-  bar: { width: 16, borderRadius: 4 },
-  barLabel: { fontSize: 11, color: P.textSoft },
+  barChart:  { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', height: 100, marginBottom: 8 },
+  barGroup:  { alignItems: 'center', gap: 4 },
+  stackBar:  { width: 28, borderRadius: 6, overflow: 'hidden', backgroundColor: '#e5e7eb', position: 'relative' },
+  barLabel:  { fontSize: 11, color: P.textSoft },
   medName: { fontSize: 14, fontWeight: '800', color: P.text },
   medSub: { fontSize: 11, color: P.textMuted, marginTop: 1 },
   doseCount: { fontSize: 12, color: P.textSoft },
