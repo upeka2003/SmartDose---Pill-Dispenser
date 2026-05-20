@@ -44,7 +44,14 @@
       "router": {},
       "eas": {
         "projectId": "bde29d0a-3979-46d9-9bb3-3523d2c8b642"
-      }
+      },
+      "firebaseApiKey": "AIzaSyDwKN3AU90Q7RfgKLODmOwOkhQPZl9F4nY",
+      "firebaseAuthDomain": "smartdose-dcd88.firebaseapp.com",
+      "firebaseProjectId": "smartdose-dcd88",
+      "firebaseStorageBucket": "smartdose-dcd88.firebasestorage.app",
+      "firebaseMessagingSenderId": "154127731250",
+      "firebaseAppId": "1:154127731250:web:fa5501a8740dcb93ee8a2b",
+      "firebaseDatabaseUrl": "https://smartdose-dcd88-default-rtdb.firebaseio.com"
     }
   }
 }

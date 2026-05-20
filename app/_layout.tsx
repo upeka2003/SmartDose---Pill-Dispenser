@@ -1,3 +1,4 @@
+import 'react-native-url-polyfill/auto';
 import { Stack, usePathname, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { onAuthStateChanged } from 'firebase/auth';
