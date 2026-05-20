@@ -11,7 +11,7 @@ import Svg, { Circle, Line, Path, Polygon, Rect } from 'react-native-svg';
 import { Palette, Radius, Shadows } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import { auth } from '../../services/firebase';
-import { dispenseNow, listenMedications, listenPowerSaving, Medication, setPowerSaving } from '../../services/medicationService';
+import { listenPowerSaving, setPowerSaving } from '../../services/medicationService';
 
 const BellIcon = ({ showDot }: { showDot: boolean }) => {
   const { palette } = useAccessibility();
@@ -119,9 +119,7 @@ export default function SettingsScreen() {
   const [doseReminders, setDoseReminders] = useState(true);
   const [soundAlerts, setSoundAlerts] = useState(true);
   const [autoRefill, setAutoRefill] = useState(true);
-  const [dispensing, setDispensing] = useState(false);
   const [powerSaving, setPowerSavingState] = useState(false);
-  const [medications, setMedications] = useState<Medication[]>([]);
 
   const { speak, voiceEnabled, cbColors, palette, darkMode, toggleDarkMode } = useAccessibility();
   const styles = useMemo(() => makeStyles(palette), [palette]);
@@ -142,11 +140,6 @@ export default function SettingsScreen() {
   );
 
   React.useEffect(() => {
-    const unsub = listenMedications(setMedications);
-    return () => unsub();
-  }, []);
-
-  React.useEffect(() => {
     const unsub = listenPowerSaving(setPowerSavingState);
     return () => unsub();
   }, []);
@@ -154,25 +147,6 @@ export default function SettingsScreen() {
   const handlePowerSaving = (val: boolean) => {
     setPowerSavingState(val);
     setPowerSaving(val);
-  };
-
-  const handleManualDispense = (compartment: number) => {
-    Alert.alert(
-      'Manual Dispense',
-      `Dispense from Compartment ${compartment}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Dispense',
-          onPress: async () => {
-            setDispensing(true);
-            await dispenseNow(compartment - 1);
-            Alert.alert('Command sent', 'ESP32 will dispense shortly.');
-            setDispensing(false);
-          }
-        }
-      ]
-    );
   };
 
   const handleSignOut = async () => {
@@ -252,38 +226,6 @@ export default function SettingsScreen() {
             value={darkMode}
             onToggle={toggleDarkMode}
           />
-        </View>
-
-        {/* Manual Dispense */}
-        <Text style={styles.sectionLabel}>Manual Dispense</Text>
-        <View style={styles.dispenseCard}>
-          {[1, 2, 3].map(comp => {
-            const med = medications.find(m => Number(m.compartment) === comp);
-            return (
-              <View key={comp} style={styles.compartmentCard}>
-                <View style={styles.compartmentHeader}>
-                  <View style={styles.compBadge}>
-                    <Text style={styles.compBadgeText}>C{comp}</Text>
-                  </View>
-                  {med && <View style={[styles.compColorDot, { backgroundColor: med.color }]} />}
-                </View>
-                <Text style={styles.compMedName} numberOfLines={1}>
-                  {med ? med.name : 'Empty'}
-                </Text>
-                <Text style={styles.compMedDose} numberOfLines={1}>
-                  {med ? med.dosage : '—'}
-                </Text>
-                <TouchableOpacity
-                  style={[styles.compDispenseBtn, (!med || dispensing) && styles.compDispenseBtnDisabled]}
-                  onPress={() => handleManualDispense(comp)}
-                  disabled={!med || dispensing}
-                  activeOpacity={0.75}
-                >
-                  <Text style={styles.compDispenseBtnText}>Dispense</Text>
-                </TouchableOpacity>
-              </View>
-            );
-          })}
         </View>
 
         {/* Notifications */}
@@ -392,15 +334,4 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   infoText: { fontSize: 14, color: P.text, lineHeight: 24, fontWeight: '600' },
   signOutBtn: { backgroundColor: P.roseSoft, borderRadius: Radius.sm, padding: 14, alignItems: 'center', marginTop: 16, borderWidth: 1, borderColor: P.rose + '40' },
   signOutText: { color: P.rose, fontWeight: '800', fontSize: 14 },
-  dispenseCard: { flexDirection: 'row', gap: 8, marginBottom: 6 },
-  compartmentCard: { flex: 1, backgroundColor: P.surface, borderRadius: Radius.lg, padding: 10, borderWidth: 1, borderColor: P.border, alignItems: 'center', ...Shadows.card },
-  compartmentHeader: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6, alignSelf: 'stretch' },
-  compBadge: { backgroundColor: P.primarySoft, borderRadius: Radius.xs, paddingHorizontal: 6, paddingVertical: 2 },
-  compBadgeText: { fontSize: 11, fontWeight: '900', color: P.primary },
-  compColorDot: { width: 8, height: 8, borderRadius: 4 },
-  compMedName: { fontSize: 12, fontWeight: '800', color: P.text, textAlign: 'center', marginBottom: 2 },
-  compMedDose: { fontSize: 11, color: P.textMuted, textAlign: 'center', marginBottom: 8 },
-  compDispenseBtn: { backgroundColor: P.primary, borderRadius: Radius.xs, paddingHorizontal: 10, paddingVertical: 6, alignSelf: 'stretch', alignItems: 'center', ...Shadows.button },
-  compDispenseBtnDisabled: { opacity: 0.4 },
-  compDispenseBtnText: { color: '#fff', fontWeight: '700', fontSize: 11 },
 });

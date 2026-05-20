@@ -9,7 +9,7 @@ import {
 import { Palette, Radius, Shadows, Space, StatusStyle, Type } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import {
-  deleteMedication, dispenseNow,
+  deleteMedication,
   listenMedications, Medication,
 } from '../../services/medicationService';
 import { cancelAllReminders, scheduleMedicationReminder } from '../../services/notificationService';
@@ -278,26 +278,6 @@ export default function HomeScreen() {
     }
   };
 
-  const handleDispenseNow = async (comp: number) => {
-    Alert.alert(
-      `Dispense from C${comp}?`,
-      'This will immediately dispense 1 pill from that compartment.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Dispense',
-          onPress: async () => {
-            try {
-              await dispenseNow(comp);
-            } catch {
-              Alert.alert('Error', 'Could not send dispense command.');
-            }
-          },
-        },
-      ]
-    );
-  };
-
   const doseStatusByMedicationId = useMemo(() => {
     const result: Record<string, DoseStatus> = {};
     const recentHistory = history.filter(isRecentHistoryItem);
@@ -423,28 +403,6 @@ export default function HomeScreen() {
             </View>
           </View>
         )}
-
-        {/* ── Dispense Now card ─────────────────────────────────────── */}
-        <View style={s.dispenseCard}>
-          <View style={s.dispenseHeader}>
-            <Zap size={15} color={palette.primary} />
-            <Text style={s.dispenseTitle}>Dispense Now</Text>
-          </View>
-          <Text style={s.dispenseSub}>Manually dispense from a compartment immediately</Text>
-          <View style={s.dispenseRow}>
-            {[1, 2, 3].map(comp => (
-              <TouchableOpacity
-                key={comp}
-                style={s.dispenseBtn}
-                onPress={() => handleDispenseNow(comp)}
-                activeOpacity={0.75}
-              >
-                <Text style={s.dispenseBtnLabel}>C{comp}</Text>
-                <Text style={s.dispenseBtnSub}>Comp {comp}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
 
         <View style={s.section}>
           <View style={s.sectionRow}>
@@ -602,24 +560,6 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
     ...Shadows.button,
   },
 
-  // Dispense Now card
-  dispenseCard: {
-    backgroundColor: P.surface, borderRadius: Radius.lg,
-    padding: Space.lg, marginBottom: Space.md,
-    borderWidth: 1, borderColor: P.border,
-    ...Shadows.card,
-  },
-  dispenseHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  dispenseTitle:  { fontSize: 15, fontWeight: '800', color: P.text },
-  dispenseSub:    { fontSize: 12, color: P.textSoft, marginBottom: 14 },
-  dispenseRow:    { flexDirection: 'row', gap: 10 },
-  dispenseBtn:    {
-    flex: 1, paddingVertical: 16, borderRadius: 12,
-    backgroundColor: P.primarySoft, alignItems: 'center',
-    borderWidth: 1.5, borderColor: P.primary + '40',
-  },
-  dispenseBtnLabel: { fontSize: 18, fontWeight: '900', color: P.primary },
-  dispenseBtnSub:   { fontSize: 11, fontWeight: '600', color: P.primary, marginTop: 2, opacity: 0.75 },
 });
 
 const makeCardStyles = (P: typeof Palette) => StyleSheet.create({

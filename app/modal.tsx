@@ -1,15 +1,32 @@
 import { useRouter } from 'expo-router';
-import { ref, remove, set } from 'firebase/database';
 import { addDoc, collection, deleteDoc, doc, getDocs, query, updateDoc, where } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Modal, Pressable, ScrollView, StatusBar, StyleSheet,
+  Alert, Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet,
   Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Palette } from '../constants/theme';
 import { useAccessibility } from '../contexts/AccessibilityContext';
-import { db, rtdb } from '../services/firebase';
+import { db } from '../services/firebase';
+
+// REST helpers — avoids the browser WebSocket block that affects Firebase SDK RTDB writes
+const RTDB_BASE = 'https://smartdose-dcd88-default-rtdb.firebaseio.com';
+const RTDB_AUTH = 'CZnwewbitQSo2RY8CvP6nf0lHbX4fAgwS7dZAKMi';
+
+const rtdbPut = async (path: string, data: any) => {
+  const url = `${RTDB_BASE}/${path}.json?auth=${RTDB_AUTH}`;
+  console.log('[Save] RTDB PUT', path, JSON.stringify(data));
+  const res    = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const result = await res.json();
+  console.log('[Save] RTDB response', path, JSON.stringify(result));
+  return result;
+};
+
+const rtdbDel = async (path: string) => {
+  const res = await fetch(`${RTDB_BASE}/${path}.json?auth=${RTDB_AUTH}`, { method: 'DELETE' });
+  return res.json();
+};
 
 const PILL_COUNTS = ['1', '2', '3'];
 
@@ -293,6 +310,11 @@ export default function ModalScreen() {
   };
 
   // ── Save ─────────────────────────────────────────────────────────────────────
+  const COMP_COLORS = ['#6366f1', '#10b981', '#f59e0b'];
+
+  const daysToBitmask = (days: boolean[]) =>
+    (days ?? ALL_DAYS).reduce((mask, on, i) => mask | (on ? (1 << i) : 0), 0);
+
   const handleSave = async () => {
     const filled = compartments.filter(c => c.name.trim());
     if (filled.length === 0) {
@@ -302,76 +324,93 @@ export default function ModalScreen() {
     setLoading(true);
     try {
       for (let ci = 0; ci < 3; ci++) {
-        const comp   = compartments[ci];
+        const comp    = compartments[ci];
         const compNum = ci + 1;
 
+        // ── Empty compartment: delete existing docs and RTDB slots ──────────
         if (!comp.name.trim()) {
           const existing = await getDocs(query(collection(db, 'medications'), where('compartment', '==', compNum)));
           for (const d of existing.docs) {
             await deleteDoc(doc(db, 'medications', d.id));
-            for (let i = 0; i < 8; i++) await remove(ref(rtdb, `smartdose/medications/${d.id}_${i}`));
+            for (let i = 0; i < 8; i++) await rtdbDel(`smartdose/medications/${d.id}_${i}`);
           }
           continue;
         }
 
-        const doseCounts = comp.times.map((_, i) => parseInt(comp.counts[i]) || 1);
-        const existing   = await getDocs(query(collection(db, 'medications'), where('compartment', '==', compNum)));
-        const existingDoc = existing.docs[0];
-
-        // Convert days boolean[][] → number[] (bitmasks) for Firestore.
-        // Firestore does not support nested arrays; bitmask avoids that.
-        const doseDaysMasks = comp.days.map(slotDays =>
-          (slotDays ?? ALL_DAYS).reduce(
-            (mask: number, on: boolean, bi: number) => mask | (on ? (1 << bi) : 0), 0
-          )
-        );
+        // ── Build Firestore payload ──────────────────────────────────────────
+        const doseCounts    = comp.times.map((_, i) => parseInt(comp.counts[i]) || 1);
+        const doseDaysMasks = comp.days.map(daysToBitmask);
 
         const payload = {
-          name: comp.name.trim(),
-          compartment: compNum,
-          times: comp.times,
-          time: comp.times[0],
+          name:          comp.name.trim(),
+          dosage:        `${doseCounts[0]} pill${doseCounts[0] > 1 ? 's' : ''}`,
+          compartment:   compNum,
+          color:         COMP_COLORS[ci],
+          times:         comp.times,
+          time:          comp.times[0],
           dosePillCounts: doseCounts,
-          pillCount: doseCounts[0],
-          doseDays: doseDaysMasks,
-          totalPills: comp.totalPills,
-          currentPills: comp.totalPills,
-          active: true,
-          taken: false,
+          pillCount:     doseCounts[0],
+          doseDays:      doseDaysMasks,
+          totalPills:    comp.totalPills,
+          currentPills:  comp.totalPills,
+          active:        true,
+          taken:         false,
         };
+        console.log(`[Save] Firestore payload C${compNum}:`, JSON.stringify(payload));
+
+        // ── Firestore: update or create ──────────────────────────────────────
+        const existing    = await getDocs(query(collection(db, 'medications'), where('compartment', '==', compNum)));
+        const existingDoc = existing.docs[0];
 
         for (const oldDoc of existing.docs.slice(1)) {
           await deleteDoc(doc(db, 'medications', oldDoc.id));
-          for (let i = 0; i < 8; i++) await remove(ref(rtdb, `smartdose/medications/${oldDoc.id}_${i}`));
+          for (let i = 0; i < 8; i++) await rtdbDel(`smartdose/medications/${oldDoc.id}_${i}`);
         }
 
         const docId = existingDoc?.id;
-        if (docId) await updateDoc(doc(db, 'medications', docId), payload);
-        const savedDoc = docId ? { id: docId } : await addDoc(collection(db, 'medications'), payload);
+        if (docId) {
+          await updateDoc(doc(db, 'medications', docId), payload);
+          console.log(`[Save] Firestore updated doc ${docId}`);
+        }
+        const savedId = docId ?? (await addDoc(collection(db, 'medications'), payload)).id;
+        if (!docId) console.log(`[Save] Firestore created doc ${savedId}`);
 
-        for (let i = 0; i < 8; i++) await remove(ref(rtdb, `smartdose/medications/${savedDoc.id}_${i}`));
+        // ── RTDB: clear old slots then write one slot per dose time ─────────
+        console.log(`[Save] Clearing RTDB slots for ${savedId}`);
+        for (let i = 0; i < 8; i++) await rtdbDel(`smartdose/medications/${savedId}_${i}`);
+
         for (let i = 0; i < comp.times.length; i++) {
           const [h, m] = comp.times[i].split(':');
-          await set(ref(rtdb, `smartdose/medications/${savedDoc.id}_${i}`), {
-            medicationId: savedDoc.id,
-            name: comp.name.trim(),
-            time: comp.times[i],
-            hour: parseInt(h) || 0,
-            minute: parseInt(m) || 0,
-            days: comp.days[i] ?? [...ALL_DAYS],
-            compartment: compNum,
-            pillCount: doseCounts[i],
-            active: true,
-            taken: false,
-          });
+          const slotData = {
+            medicationId: savedId,
+            name:         comp.name.trim(),
+            time:         comp.times[i],
+            hour:         parseInt(h) || 0,
+            minute:       parseInt(m) || 0,
+            days:         daysToBitmask(comp.days[i] ?? ALL_DAYS),  // uint8 bitmask the firmware expects
+            compartment:  compNum,
+            pillCount:    doseCounts[i],
+            active:       true,
+            taken:        false,
+          };
+          await rtdbPut(`smartdose/medications/${savedId}_${i}`, slotData);
         }
+        console.log(`[Save] C${compNum} done — ${comp.times.length} slot(s) written`);
       }
 
-      Alert.alert('Saved!', 'All compartments updated. Device will sync within 5 minutes.');
+      if (Platform.OS === 'web') {
+        window.alert('Saved! All compartments updated. Device will sync within 5 minutes.');
+      } else {
+        Alert.alert('Saved!', 'All compartments updated. Device will sync within 5 minutes.');
+      }
       router.back();
-    } catch (e) {
-      Alert.alert('Error', 'Failed to save. Please try again.');
-      console.error(e);
+    } catch (e: any) {
+      console.error('[Save] ERROR:', e?.message ?? e);
+      if (Platform.OS === 'web') {
+        window.alert('Error: ' + (e?.message ?? 'Failed to save. Please try again.'));
+      } else {
+        Alert.alert('Error', e?.message ?? 'Failed to save. Please try again.');
+      }
     }
     setLoading(false);
   };

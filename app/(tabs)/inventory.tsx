@@ -3,58 +3,123 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { doc, updateDoc } from 'firebase/firestore';
 import { Bell, Package } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Palette, Radius, Shadows } from '../../constants/theme';
 import { useAccessibility } from '../../contexts/AccessibilityContext';
 import { db } from '../../services/firebase';
 import { listenMedications, Medication } from '../../services/medicationService';
 
-const COMP_COLORS = ['#3B82F6', '#10B981', '#F59E0B'];
+const RTDB_HISTORY_URL =
+  'https://smartdose-dcd88-default-rtdb.firebaseio.com/smartdose/history.json?auth=CZnwewbitQSo2RY8CvP6nf0lHbX4fAgwS7dZAKMi';
+
+const COMP_COLORS = ['#6366f1', '#10b981', '#f59e0b'];
 
 export default function InventoryScreen() {
   const router = useRouter();
   const { hasUnread } = useNotifications();
   const { cbColors, colorBlindMode, palette, darkMode } = useAccessibility();
   const [medications, setMedications] = useState<Medication[]>([]);
+  const [rtdbHistory, setRtdbHistory] = useState<Record<string, any>>({});
   const s = useMemo(() => makeStyles(palette), [palette]);
 
   useEffect(() => {
     const unsub = listenMedications(setMedications);
-    return () => unsub();
+
+    let cancelled = false;
+    const pollHistory = async () => {
+      if (cancelled) return;
+      try {
+        const res  = await fetch(RTDB_HISTORY_URL);
+        const data = await res.json();
+        if (!cancelled) setRtdbHistory(data || {});
+      } catch (e) { console.error('[Inventory] history poll error:', e); }
+    };
+
+    pollHistory();
+    const timer = setInterval(pollHistory, 15_000);
+    return () => { cancelled = true; clearInterval(timer); unsub(); };
   }, []);
 
   useFocusEffect(React.useCallback(() => {}, []));
+
+  // Count how many dispensed events exist in RTDB history for a medication
+  // filtered to those AFTER the last refill timestamp (stored in Firestore as lastRefillAt ISO string)
+  const getDispensedCount = (med: Medication): number => {
+    const lastRefillSec = (med as any).lastRefillAt
+      ? new Date((med as any).lastRefillAt).getTime() / 1000
+      : 0;
+    let count = 0;
+    for (const [id, val] of Object.entries(rtdbHistory)) {
+      const key = Number(id);
+      if (Number.isFinite(key) && key < lastRefillSec) continue;
+      // Unwrap push-key wrapper if present
+      const entry = (val && typeof val === 'object' && !val.status)
+        ? Object.values(val)[0] as any
+        : val;
+      const status = String(entry?.status ?? '').trim().toLowerCase();
+      if (!['taken', 'dispensed', 'auto-dispensed'].includes(status)) continue;
+      const matches =
+        entry?.medicationId === med.id ||
+        String(entry?.medication ?? '').trim().toLowerCase() === med.name.trim().toLowerCase() ||
+        Number(entry?.compartment) === med.compartment - 1;
+      if (matches) count++;
+    }
+    return count;
+  };
+
+  const getCurrentPills = (med: Medication): number => {
+    const total    = Number((med as any).totalPills ?? 30);
+    const perDose  = Number((med as any).pillCount  ?? 1);
+    const dispensed = getDispensedCount(med);
+    return Math.max(0, total - dispensed * perDose);
+  };
 
   const getCompartmentMeds = (comp: number) =>
     medications.filter(m => Number(m.compartment) === comp);
 
   const handleRefill = (med: Medication) => {
-    Alert.alert(
-      'Refill',
-      `Refill "${med.name}" to ${med.totalPills ?? 30} pills?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Refill', onPress: async () => {
-            try {
-              await updateDoc(doc(db, 'medications', med.id), {
-                currentPills: med.totalPills ?? 30,
-              });
-              Alert.alert('Done', `${med.name} refilled.`);
-            } catch {
-              Alert.alert('Error', 'Could not update. Check Firebase rules.');
-            }
-          },
-        },
-      ]
-    );
+    const total = med.totalPills ?? 30;
+
+    const doRefill = async () => {
+      try {
+        await updateDoc(doc(db, 'medications', med.id), {
+          totalPills:   total,
+          currentPills: total,
+          lastRefillAt: new Date().toISOString(),
+        });
+        if (Platform.OS === 'web') {
+          window.alert(`${med.name} refilled to ${total} pills.`);
+        } else {
+          Alert.alert('Done', `${med.name} refilled to ${total} pills.`);
+        }
+      } catch {
+        if (Platform.OS === 'web') {
+          window.alert('Could not update. Check Firebase rules.');
+        } else {
+          Alert.alert('Error', 'Could not update. Check Firebase rules.');
+        }
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      if (window.confirm(`Refill "${med.name}" to ${total} pills?`)) doRefill();
+    } else {
+      Alert.alert(
+        'Refill',
+        `Refill "${med.name}" to ${total} pills?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Refill', onPress: doRefill },
+        ]
+      );
+    }
   };
 
   const totalMeds = medications.length;
   const lowMeds   = medications.filter(m => {
-    const cur = (m as any).currentPills ?? (m as any).totalPills ?? 30;
-    const tot = (m as any).totalPills ?? 30;
-    return (cur / tot) <= 0.3;
+    const cur = getCurrentPills(m);
+    const tot = Number((m as any).totalPills ?? 30);
+    return tot > 0 && (cur / tot) <= 0.3;
   }).length;
 
   return (
@@ -119,14 +184,14 @@ export default function InventoryScreen() {
               </View>
             ) : (
               meds.map(med => {
-                const cur = (med as any).currentPills ?? (med as any).totalPills ?? 30;
-                const tot = (med as any).totalPills ?? 30;
-                const pct = Math.min(Math.round((cur / tot) * 100), 100);
-                const isLow = pct <= 30;
-                const isMid = pct > 30 && pct <= 60;
-                const barColor = isLow
+                const cur     = getCurrentPills(med);
+                const tot     = Number((med as any).totalPills ?? 30);
+                const pct     = tot > 0 ? Math.min(Math.round((cur / tot) * 100), 100) : 0;
+                const isEmpty = cur <= 0;
+                const isLow   = !isEmpty && pct <= 30;
+                const barColor = isEmpty
                   ? cbColors.danger
-                  : isMid
+                  : isLow
                   ? cbColors.warning
                   : colorBlindMode ? '#2563EB' : med.color;
 
@@ -138,31 +203,45 @@ export default function InventoryScreen() {
                         <Text style={s.medName}>{med.name}</Text>
                         <Text style={s.medSub}>
                           {med.dosage}
-                          {med.pillCount && med.pillCount > 1
-                            ? `  ·  ${med.pillCount} pills/dose`
+                          {(med as any).pillCount && Number((med as any).pillCount) > 1
+                            ? `  ·  ${(med as any).pillCount} pills/dose`
                             : '  ·  1 pill/dose'}
                         </Text>
                       </View>
                     </View>
 
-                    {isLow && (
+                    {isEmpty ? (
+                      <View style={s.outBadge}>
+                        <Text style={s.outBadgeTxt}>Out of Stock</Text>
+                      </View>
+                    ) : isLow ? (
                       <View style={s.lowBadge}>
                         <Text style={s.lowBadgeTxt}>Low</Text>
                       </View>
-                    )}
+                    ) : null}
 
                     <View style={s.track}>
                       <View style={[s.trackFill, { width: `${pct}%`, backgroundColor: barColor }]} />
                     </View>
-                    <Text style={s.pillsTxt}>{cur} / {tot} pills  ({pct}%)</Text>
+                    <Text style={[s.pillsTxt, isEmpty && { color: cbColors.danger, fontWeight: '700' }]}>
+                      {cur} / {tot} pills  ({pct}%)
+                    </Text>
 
                     <TouchableOpacity
-                      style={[s.refillBtn, { backgroundColor: isLow ? cbColors.danger : color }]}
+                      style={[s.refillBtn, {
+                        backgroundColor: isEmpty ? cbColors.danger : isLow ? cbColors.warning : color,
+                      }]}
                       onPress={() => handleRefill(med)}
                       activeOpacity={0.8}
                     >
-                      <Text style={s.refillTxt}>{isLow ? '⚠ Refill Now' : '+ Refill'}</Text>
+                      <Text style={s.refillTxt}>
+                        {isEmpty ? '⚠ Refill Now' : isLow ? '⚠ Low — Refill' : '+ Refill'}
+                      </Text>
                     </TouchableOpacity>
+
+                    {!(med as any).lastRefillAt && (
+                      <Text style={s.refillHint}>Tap Refill after loading pills to start tracking</Text>
+                    )}
                   </View>
                 );
               })
@@ -220,12 +299,15 @@ const makeStyles = (P: typeof Palette) => StyleSheet.create({
   medName:  { fontSize: 15, fontWeight: '800', color: P.text },
   medSub:   { fontSize: 12, color: P.textMuted, marginTop: 2 },
 
+  outBadge:    { alignSelf: 'flex-start', backgroundColor: P.roseSoft, paddingHorizontal: 8, paddingVertical: 3, borderRadius: Radius.sm, marginBottom: 8, borderWidth: 1, borderColor: P.rose + '60' },
+  outBadgeTxt: { fontSize: 11, color: P.rose, fontWeight: '800' },
   lowBadge:    { alignSelf: 'flex-start', backgroundColor: P.amberSoft, paddingHorizontal: 8, paddingVertical: 3, borderRadius: Radius.sm, marginBottom: 8, borderWidth: 1, borderColor: '#F6D878' },
   lowBadgeTxt: { fontSize: 11, color: P.amber, fontWeight: '800' },
 
   track:     { height: 8, backgroundColor: P.border, borderRadius: 999, marginBottom: 6 },
   trackFill: { height: 8, borderRadius: 999, minWidth: 4 },
   pillsTxt:  { fontSize: 12, color: P.textMuted, marginBottom: 10 },
+  refillHint:{ fontSize: 11, color: P.textSoft, marginTop: 6, fontStyle: 'italic' },
 
   refillBtn: { alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 16, borderRadius: Radius.sm, ...Shadows.button },
   refillTxt: { color: '#fff', fontWeight: '800', fontSize: 12 },

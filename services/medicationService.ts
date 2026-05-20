@@ -18,6 +18,7 @@ export interface Medication {
   frequency?: string;
   mealPreference?: string;
   notes?: string;
+  lastRefillAt?: string;
 }
 
 export interface DeviceStatus {
